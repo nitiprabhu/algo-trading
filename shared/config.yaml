@@ -1,0 +1,99 @@
+instruments:
+  - symbol: NIFTY
+    display_name: Nifty 50
+    exchange: NSE
+    historical_scrip_code: NIDX_40000001
+    websocket_token: NIDX:40000001
+    enabled: true
+    role: trading
+    timeframes: [1m, 5m, 15m, 1hr, 1D]
+  - symbol: BANKNIFTY
+    display_name: Nifty Bank
+    exchange: NSE
+    historical_scrip_code: NIDX_40000003
+    websocket_token: NIDX:40000003
+    enabled: true
+    role: trading
+    timeframes: [1m, 5m, 15m, 1hr, 1D]
+  - symbol: RELIANCE
+    display_name: Reliance Industries
+    exchange: NSE
+    historical_scrip_code: NSE_2885
+    websocket_token: NSE:2885
+    enabled: true
+    role: monitor
+    timeframes: [1m]
+  - symbol: HDFCBANK
+    display_name: HDFC Bank
+    exchange: NSE
+    historical_scrip_code: NSE_1333
+    websocket_token: NSE:1333
+    enabled: true
+    role: monitor
+    timeframes: [1m]
+  - symbol: INDIAVIX
+    display_name: India VIX
+    exchange: NSE
+    historical_scrip_code: NIDX_40000107
+    websocket_token: NIDX:40000107
+    enabled: true
+    role: monitor
+    timeframes: [1m]
+
+data:
+  source: mock
+  indstocks:
+    base_url: https://api.indstocks.com
+    websocket_url: wss://ws-prices.indstocks.com/api/v1/ws/prices
+    historical_interval: 1minute
+    historical_lookback_days: 4
+    websocket_mode: quote
+
+market_hours:
+  timezone: Asia/Kolkata
+  stream_connect: "09:25"
+  signal_start: "09:30"
+  signal_end: "15:15"
+  square_off: "15:00"
+
+confluence_thresholds:
+  NIFTY: 0.55
+  BANKNIFTY: 0.55
+  RELIANCE: 0.55
+  HDFCBANK: 0.55
+  DEFAULT: 0.55
+
+indicator_weights:
+  NIFTY:
+    rsi: 0.18
+    macd: 0.18
+    ema_ribbon: 0.14
+    vwap: 0.20
+    supertrend: 0.20
+    volume: 0.10
+  BANKNIFTY:
+    rsi: 0.16
+    macd: 0.20
+    ema_ribbon: 0.08
+    vwap: 0.20
+    supertrend: 0.26
+    volume: 0.10
+
+ai:
+  provider: openai
+  fallback_provider: rule_based
+  model: gpt-4o-mini
+  openai_model: gpt-4o-mini
+  temperature: 0.1
+  max_tokens: 500
+
+risk:
+  total_capital: 500000
+  notional_per_trade: 100000
+  max_open_positions: 2
+  max_signals_per_instrument_per_hour: 3
+  confidence_floor: 60
+  daily_drawdown_pause_pct: 5.0
+  stale_feed_seconds: 60
+  price_deviation_guard_pct: 5.0
+  timeframe_mins: 15

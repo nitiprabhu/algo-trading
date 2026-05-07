@@ -1,0 +1,48 @@
+CREATE TABLE IF NOT EXISTS candles (
+  time TIMESTAMPTZ NOT NULL,
+  instrument TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  open DOUBLE PRECISION NOT NULL,
+  high DOUBLE PRECISION NOT NULL,
+  low DOUBLE PRECISION NOT NULL,
+  close DOUBLE PRECISION NOT NULL,
+  volume BIGINT NOT NULL,
+  PRIMARY KEY (time, instrument, timeframe)
+);
+
+CREATE TABLE IF NOT EXISTS signals (
+  id UUID PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL,
+  instrument TEXT NOT NULL,
+  signal TEXT NOT NULL CHECK (signal IN ('BUY', 'SELL', 'HOLD')),
+  confidence INT NOT NULL CHECK (confidence BETWEEN 0 AND 100),
+  entry_low DOUBLE PRECISION NOT NULL,
+  entry_high DOUBLE PRECISION NOT NULL,
+  stop_loss DOUBLE PRECISION NOT NULL,
+  target_1 DOUBLE PRECISION NOT NULL,
+  target_2 DOUBLE PRECISION NOT NULL,
+  rrr DOUBLE PRECISION NOT NULL,
+  reasoning TEXT NOT NULL,
+  warnings JSONB NOT NULL DEFAULT '[]',
+  indicator_snapshot JSONB NOT NULL,
+  confluence_score DOUBLE PRECISION NOT NULL,
+  ai_model TEXT NOT NULL,
+  ai_status TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS paper_trades (
+  id UUID PRIMARY KEY,
+  signal_id UUID REFERENCES signals(id),
+  instrument TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK (direction IN ('BUY', 'SELL')),
+  entry_price DOUBLE PRECISION NOT NULL,
+  entry_time TIMESTAMPTZ NOT NULL,
+  exit_price DOUBLE PRECISION,
+  exit_time TIMESTAMPTZ,
+  exit_reason TEXT,
+  pnl DOUBLE PRECISION NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  sl_price DOUBLE PRECISION NOT NULL,
+  t1_price DOUBLE PRECISION NOT NULL,
+  t2_price DOUBLE PRECISION NOT NULL
+);

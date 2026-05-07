@@ -1,0 +1,96 @@
+{
+    "date": "2026-04-30",
+    "metrics": {
+        "total_trades": 8.0,
+        "win_rate": 37.5,
+        "profit_factor": 0.86,
+        "realized_pnl": -89.46,
+        "realized_pnl_pct": -0.02,
+        "open_pnl": 0,
+        "open_pnl_pct": 0.0,
+        "total_invested": 562803.16,
+        "total_recovered": 562713.7,
+        "instruments": {
+            "NIFTY": {
+                "trades": 3,
+                "win_rate": 33.33,
+                "pnl": 72.52,
+                "invested": 288082.36,
+                "open_pnl": 0
+            },
+            "BANKNIFTY": {
+                "trades": 5,
+                "win_rate": 40.0,
+                "pnl": -161.98,
+                "invested": 274720.8,
+                "open_pnl": 0
+            }
+        }
+    },
+    "trades": [
+        {
+            "id": "0faf13b7-3ba0-422b-9daf-5b9e507536a7",
+            "direction": "BUY",
+            "entry": 54657.62,
+            "exit": 54822.58,
+            "reason": "T2",
+            "pnl": 164.96
+        },
+        {
+            "id": "fadcca52-da00-4db4-9908-6891b3ff24b0",
+            "direction": "BUY",
+            "entry": 23911.7,
+            "exit": 23988.0,
+            "reason": "T2",
+            "pnl": 305.2
+        },
+        {
+            "id": "840de9ef-c1f5-49b4-b387-ec2b86613b6a",
+            "direction": "BUY",
+            "entry": 54891.28,
+            "exit": 54972.5,
+            "reason": "T2",
+            "pnl": 81.22
+        },
+        {
+            "id": "77213c87-497e-4fdf-9ad9-f4a7d62af452",
+            "direction": "BUY",
+            "entry": 55098.39,
+            "exit": 54967.76,
+            "reason": "SL",
+            "pnl": -130.63
+        },
+        {
+            "id": "c0b9a7ec-800c-4ad1-a1e5-b52413e84604",
+            "direction": "BUY",
+            "entry": 24041.81,
+            "exit": 24029.79,
+            "reason": "SL",
+            "pnl": -48.08
+        },
+        {
+            "id": "7e6ea876-0100-4186-a0f3-84fa89fafa96",
+            "direction": "BUY",
+            "entry": 55003.44,
+            "exit": 54867.55,
+            "reason": "SL",
+            "pnl": -135.89
+        },
+        {
+            "id": "0d6aabfa-7196-4eb8-a1f9-685f8f62c861",
+            "direction": "BUY",
+            "entry": 55070.07,
+            "exit": 54928.43,
+            "reason": "SL",
+            "pnl": -141.64
+        },
+        {
+            "id": "4c2d82b4-526e-40ae-979d-5f8d25ef960e",
+            "direction": "BUY",
+            "entry": 24067.08,
+            "exit": 24020.93,
+            "reason": "EOD_SQUAREOFF",
+            "pnl": -184.6
+        }
+    ]
+}

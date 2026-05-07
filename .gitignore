@@ -1,0 +1,49 @@
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environment and packaging
+.venv/
+.venv_old/
+env/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Caches and runtime
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Node.js and Next.js
+node_modules/
+frontend/node_modules/
+frontend/.next/
+.next/
+out/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logging and runtime telemetry
+*.log
+nohup.out
+logs/
+raw_ticks.log
+snapshot.json
+backtest_analysis.json
+backtest_analysis_ai.json
+
+# IDEs and OS metadata
+.DS_Store
+.vscode/
+.idea/
+.claude/
+.gemini/

@@ -47,3 +47,7 @@ backtest_analysis_ai.json
 .idea/
 .claude/
 .gemini/
+
+# Database files
+*.db
+

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import yaml
 from datetime import datetime, timedelta, time
@@ -8,7 +9,7 @@ import httpx
 
 IST = ZoneInfo("Asia/Kolkata")
 
-def test_strategy():
+async def test_strategy():
     with open("shared/config.yaml", "r") as f:
         config_data = yaml.safe_load(f)
     config = Config(**config_data)
@@ -142,13 +143,13 @@ def test_strategy():
             # This is handled inside update()
             pass
         
-        sig = engine.get_fo_signal(candles[i], candles[:i+1], vix_val)
+        sig = await engine.get_fo_signal(candles[i], candles[:i+1], vix_val)
         if sig:
-            print(f"SIGNAL: {sig.strategy} {sig.direction} {sig.option_type} at {candles[i].time}")
+            print(f"SIGNAL: {sig.strategy_name} {sig.signal} at {candles[i].time}")
             signals.append(sig)
             
     if not signals:
         print("No signals found in the last day's data.")
 
 if __name__ == "__main__":
-    test_strategy()
+    asyncio.run(test_strategy())

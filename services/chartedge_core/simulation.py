@@ -158,7 +158,7 @@ class MarketSimulator:
             
             # F&O specific strategy check (1m resolution)
             vix_val = self.candles.get("INDIAVIX")[-1].close if self.candles.get("INDIAVIX") else 0.0
-            fo_signal = self.signal_engine.get_fo_signal(candle, list(self.candles[symbol]), vix_val)
+            fo_signal = await self.signal_engine.get_fo_signal(candle, list(self.candles[symbol]), vix_val, snapshot)
             if fo_signal:
                 # Rate Limit Guard
                 if self._is_rate_limited(symbol, fo_signal.strategy_name, candle.time):
@@ -306,6 +306,7 @@ class MarketSimulator:
                 opt_signal = signal.model_copy()
                 opt_signal.id = uuid.uuid4() # Generate NEW unique ID for the option signal
                 opt_signal.instrument = opt_contract["symbol"]
+                opt_signal.signal = Direction.BUY  # We always BUY the option contract (long CE/PE) to profit from underlying momentum
                 
                 # PRD: Translate Index SL/Targets to Option Premium Levels (Delta Proxy = 0.5)
                 delta = 0.5

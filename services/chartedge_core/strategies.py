@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, time, date
 from typing import Optional, Dict
 
 from services.chartedge_core.models import Candle, Direction
@@ -28,10 +28,20 @@ class EagleNiftyT315(OptionStrategy):
         self.last_signal_time: Optional[datetime] = None
         self.breakout_detected: Optional[str] = None  # "CE" or "PE"
         self.breakout_price: Optional[float] = None
+        self.current_day: Optional[date] = None
 
     def update(self, candle: Candle):
         if candle.instrument != "NIFTY":
             return
+
+        current_date = candle.time.date()
+        if self.current_day is None or self.current_day != current_date:
+            self.current_day = current_date
+            self.range_high = None
+            self.range_low = None
+            self.is_range_set = False
+            self.breakout_detected = None
+            self.breakout_price = None
 
         # Time-Bound Range Definition (09:15 - 09:30 IST)
         t = candle.time.time()
@@ -43,7 +53,7 @@ class EagleNiftyT315(OptionStrategy):
         
         if t > time(9, 30):
             if not self.is_range_set and self.range_high is not None:
-                print(f"🎯 T315 Range Set: {self.range_low} - {self.range_high}")
+                print(f"🎯 T315 Range Set for {current_date}: {self.range_low} - {self.range_high}")
                 self.is_range_set = True
 
     def get_signal(self, candle: Candle, india_vix: float = 0.0) -> Optional[Dict]:

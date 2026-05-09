@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from services.chartedge_core.confluence import consideration
+from services.chartedge_core.debate import DebateEngine
 from services.chartedge_core.models import Candle, Direction, EntryZone, IndicatorSnapshot, Signal
 from services.chartedge_core.prompt_builder import SYSTEM_PROMPT_INDEX, SYSTEM_PROMPT_EQUITY, build_user_prompt
 from services.chartedge_core.strategies import EagleNiftyT315, FiveEMAScalping
@@ -147,7 +148,10 @@ class SignalEngine:
         self.ai_config = ai_config
         self.thresholds = thresholds
         self.ai_enabled = bool(ai_config.get("enabled", True))
+        self.debate_enabled = bool(ai_config.get("debate_enabled", False))
+        self.debate_min_confluence = float(ai_config.get("debate_min_confluence", 0.5))
         self.provider = self._provider(ai_config.get("provider", "openai"))
+        self.debate_engine = DebateEngine(self.provider)
         self.strategies: dict[str, dict[str, OptionStrategy]] = {}
 
     def _confirm_entry_momentum(self, direction: Direction, candles: list[Candle]) -> bool:
@@ -205,18 +209,23 @@ class SignalEngine:
             return self._rule_based_signal(snapshot, candles, direction, "BACKTEST_RULE_BASED")
 
         try:
-                
-            # Choose system prompt based on instrument type
-            sys_prompt = SYSTEM_PROMPT_INDEX
-            if snapshot.instrument in ["RELIANCE", "HDFCBANK"]:
-                sys_prompt = SYSTEM_PROMPT_EQUITY
-                
-            prompt = build_user_prompt(snapshot, candles, "midday")
-            if momentum_alert:
-                prompt = f"!!! {momentum_alert} !!!\n{prompt}\n\nURGENT: Validate the volume profile of this momentum spike before signaling."
-            
-            raw = await self.provider.complete(prompt, sys_prompt)
-                
+            use_debate = (
+                self.debate_enabled
+                and abs(snapshot.confluence_score) > self.debate_min_confluence
+            )
+            if use_debate:
+                raw = await self.debate_engine.run(
+                    snapshot, candles, "midday", momentum_alert=momentum_alert
+                )
+            else:
+                sys_prompt = SYSTEM_PROMPT_INDEX
+                if snapshot.instrument in ["RELIANCE", "HDFCBANK"]:
+                    sys_prompt = SYSTEM_PROMPT_EQUITY
+                prompt = build_user_prompt(snapshot, candles, "midday")
+                if momentum_alert:
+                    prompt = f"!!! {momentum_alert} !!!\n{prompt}\n\nURGENT: Validate the volume profile of this momentum spike before signaling."
+                raw = await self.provider.complete(prompt, sys_prompt)
+
             signal = self._from_ai_json(snapshot, raw, self.provider.name)
                 
             # AI HOLD always wins — don't enter if AI is uncertain
@@ -259,8 +268,14 @@ class SignalEngine:
             return Direction.BUY
         return None
 
-    def get_fo_signal(self, candle: Candle, candles: list[Candle], india_vix: float = 0.0) -> Optional[Signal]:
-        """Check for F&O specific strategy triggers (T315, 5EMA)."""
+    async def get_fo_signal(
+        self,
+        candle: Candle,
+        candles: list[Candle],
+        india_vix: float = 0.0,
+        latest_snapshot: IndicatorSnapshot | None = None,
+    ) -> Signal | None:
+        """Check for F&O specific strategy triggers (T315, 5EMA) and review them via AI."""
         symbol = candle.instrument
         if symbol not in self.strategies:
             self.strategies[symbol] = {
@@ -276,14 +291,55 @@ class SignalEngine:
 
         # 2. Check for triggers
         t315_trigger = strategies["t315"].get_signal(candle, india_vix)
-        if t315_trigger:
-            return self._from_strategy_dict(t315_trigger, candle)
+        trigger = t315_trigger or strategies["ema5"].get_signal(candle, india_vix)
         
-        ema5_trigger = strategies["ema5"].get_signal(candle, india_vix)
-        if ema5_trigger:
-            return self._from_strategy_dict(ema5_trigger, candle)
+        if not trigger:
+            return None
+
+        base_signal = self._from_strategy_dict(trigger, candle)
+        
+        # If AI is disabled, accept strategy signal directly
+        if not self.ai_enabled:
+            return base_signal
+
+        # Use the latest indicator snapshot or fallback to base
+        snapshot = latest_snapshot or base_signal.indicator_snapshot
             
-        return None
+        # Run AI Debate/Review on the strategy-generated signal
+        try:
+            use_debate = self.debate_enabled
+            
+            momentum_alert = f"STRATEGY TRIGGER ({trigger['strategy']}): {trigger['reason']}"
+            
+            if use_debate:
+                print(f"🤖 [AI Debate] Reviewing strategy signal for {symbol} at {candle.time}...")
+                raw = await self.debate_engine.run(
+                    snapshot, candles, "midday", momentum_alert=momentum_alert
+                )
+            else:
+                print(f"🤖 [AI Single] Reviewing strategy signal for {symbol} at {candle.time}...")
+                sys_prompt = SYSTEM_PROMPT_INDEX
+                prompt = build_user_prompt(snapshot, candles, "midday")
+                prompt = f"!!! {momentum_alert} !!!\n{prompt}\n\nURGENT: Validate if this strategy setup is safe and high probability."
+                raw = await self.provider.complete(prompt, sys_prompt)
+
+            ai_signal = self._from_ai_json(snapshot, raw, self.provider.name)
+            
+            if ai_signal.signal == Direction.HOLD:
+                print(f"🛑 [AI Review] Strategy signal REJECTED: {ai_signal.reasoning}")
+                return None
+                
+            print(f"✅ [AI Review] Strategy signal CONFIRMED: {ai_signal.reasoning}")
+            # Retain strategy levels but update confidence, reasoning, and status from AI
+            base_signal.confidence = ai_signal.confidence
+            base_signal.reasoning = f"AI Confirmed ({trigger['strategy']}): {ai_signal.reasoning}"
+            base_signal.ai_model = ai_signal.ai_model
+            base_signal.ai_status = "CONFIRMED"
+            return base_signal
+            
+        except Exception as e:
+            print(f"⚠️ AI Review failed: {e}. Falling back to rule-based strategy signal.")
+            return base_signal
 
     def _from_strategy_dict(self, trigger: dict, candle: Candle) -> Signal:
         """Convert a strategy trigger dictionary to a Signal object."""

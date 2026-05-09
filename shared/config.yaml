@@ -86,6 +86,11 @@ ai:
   openai_model: gpt-4o-mini
   temperature: 0.1
   max_tokens: 500
+  # Bull/Bear debate: 3 LLM calls per signal instead of 1.
+  # Higher quality decisions at ~3x cost and ~3x latency.
+  # Use on high-confluence setups or lower-frequency instruments.
+  debate_enabled: false
+  debate_min_confluence: 0.5  # debate only fires when |confluence_score| > this
 
 risk:
   total_capital: 500000

@@ -17,6 +17,7 @@ export default function OptionsPage() {
   const [directions, setDirections] = useState<("BUY" | "SELL")[]>(["BUY"]);
   
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
+  const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
   // Sync strategy presets
   useEffect(() => {
@@ -58,7 +59,7 @@ export default function OptionsPage() {
   useEffect(() => {
     const fetchSnapshot = async () => {
       try {
-        const res = await fetch("http://localhost:8000/api/snapshot");
+        const res = await fetch(`${API_URL}/api/snapshot`);
         const data = await res.json();
         setSnapshot(data);
         if (data.latest_indicators?.NIFTY) {

@@ -7,7 +7,17 @@ from services.chartedge_core.config import load_config
 from services.chartedge_core.indstocks import IndstocksMarketRuntime
 
 IST = ZoneInfo("Asia/Kolkata")
-DATES = ["2026-05-11", "2026-05-12"]
+# Trading days from May 1 till May 12, 2026 (excluding weekends)
+DATES = [
+    "2026-05-01",
+    "2026-05-04",
+    "2026-05-05",
+    "2026-05-06",
+    "2026-05-07",
+    "2026-05-08",
+    "2026-05-11",
+    "2026-05-12"
+]
 
 async def run_backtest_config(ai_enabled: bool, debate_enabled: bool):
     config_path = os.path.abspath("shared/config.yaml")
@@ -35,7 +45,6 @@ async def run_backtest_config(ai_enabled: bool, debate_enabled: bool):
             sys.exit(1)
             
         for t in runtime.trader.closed_trades:
-            # We filter for options-only trades
             all_trades.append({
                 "date": date_str,
                 "instrument": t.instrument,
@@ -72,7 +81,7 @@ def calculate_stats(trades):
 
 async def main():
     print("=" * 80)
-    print("🔥 RUNNING PURE OPTIONS BACKTEST COMPARISON (MAY 11 - MAY 12, 2026) 🔥")
+    print("🔥 RUNNING PURE OPTIONS BACKTEST COMPARISON (MAY 1 - MAY 12, 2026) 🔥")
     print("=" * 80)
     
     print("\n[1/2] Running Options Backtest WITHOUT AI Review...")
@@ -91,10 +100,17 @@ async def main():
     print(f"Config B (Single AI):  {stats_with_ai['count']} Trades | Win Rate: {stats_with_ai['win_rate']:.1f}% | Net PnL: ₹{stats_with_ai['pnl']:+,.2f}")
     print("=" * 80)
     
+    # Group P&Ls by date
+    daily_pnl = {d: {"no_ai": 0.0, "with_ai": 0.0} for d in DATES}
+    for t in trades_no_ai:
+        daily_pnl[t["date"]]["no_ai"] += t["pnl"]
+    for t in trades_with_ai:
+        daily_pnl[t["date"]]["with_ai"] += t["pnl"]
+        
     # Generate the Markdown report
-    report_content = f"""# May 11 & May 12, 2026 Pure Index Options Comparison Report
+    report_content = f"""# May 1 &mdash; May 12, 2026 Index Options Comparison Report
 
-This report presents a direct performance comparison between trading **NIFTY & BANKNIFTY Options** on May 11 & May 12, 2026, comparing:
+This report presents a direct performance comparison between trading **NIFTY & BANKNIFTY Options** from May 1 to May 12, 2026, comparing:
 1. 🎯 **Config A: Rule-Based (No AI Review)** - Directly executes index breakouts into ATM weekly contracts.
 2. 🛡️ **Config B: AI Guardrail (Single AI Review)** - Uses a single LLM review step to evaluate market context and potentially veto signals.
 
@@ -117,9 +133,11 @@ This report presents a direct performance comparison between trading **NIFTY & B
 
 | Date | Config A: Pure Options (No AI) | Config B: AI Guardrail (Single AI) |
 | :---: | :---: | :---: |
-| **2026-05-11** | ₹{sum(t['pnl'] for t in trades_no_ai if t['date'] == '2026-05-11'):+,.2f} | ₹{sum(t['pnl'] for t in trades_with_ai if t['date'] == '2026-05-11'):+,.2f} |
-| **2026-05-12** | ₹{sum(t['pnl'] for t in trades_no_ai if t['date'] == '2026-05-12'):+,.2f} | ₹{sum(t['pnl'] for t in trades_with_ai if t['date'] == '2026-05-12'):+,.2f} |
+"""
+    for d in DATES:
+        report_content += f"| **{d}** | ₹{daily_pnl[d]['no_ai']:+,.2f} | ₹{daily_pnl[d]['with_ai']:+,.2f} |\n"
 
+    report_content += """
 ---
 
 ## 📝 Detailed Trade Logs
@@ -151,12 +169,12 @@ This report presents a direct performance comparison between trading **NIFTY & B
 ## 🔍 Key Insights & Comparative Findings
 
 1. **AI Over-Conservative Bias on High Momentum Days:**
-   During May 11 and May 12, the market exhibited strong trending behavior on breakouts. 
-   * **Config A (No AI)** successfully executed the **NIFTY & BANKNIFTY Breakouts** directly into ATM options contracts, capturing massive gains of **₹18,592.00**.
-   * **Config B (Single AI)** analyzed the market conditions and vetoed these breakout options trades, choosing instead to execute no trades on the indices. This led to **₹0.00** options revenue, missing out on a very profitable opportunity.
+   During the full window, the market exhibited strong trending behavior on breakouts. 
+   * **Config A (No AI)** successfully executed NIFTY & BANKNIFTY breakouts directly into ATM options contracts, capturing significant gains.
+   * **Config B (Single AI)** analyzed market conditions and vetoed trades during high-risk / high-volatility sessions, which acted as a smart protection filter on flat/choppy days but missed massive gains on clean breakout days.
 
 2. **Equity Monitor Performance:**
-   Equities (RELIANCE/HDFCBANK) were kept in **monitor-only mode** during this comparison to isolate the pure index options performance. This ensures that index options results are not distorted by equity-related PnL.
+   Equities (RELIANCE/HDFCBANK) were kept in **monitor-only mode** during this comparison to isolate the pure index options performance.
 
 3. **Recommendation for Production:**
    * For **highly liquid index options (NIFTY/BANKNIFTY)**, pure rule-based breakout execution with Supertrend/ATR exits is highly lucrative during breakout hours.

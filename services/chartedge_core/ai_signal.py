@@ -4,15 +4,13 @@ import asyncio
 import json
 import os
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
 
 from services.chartedge_core.confluence import consideration
-from services.chartedge_core.debate import DebateEngine
 from services.chartedge_core.models import Candle, Direction, EntryZone, IndicatorSnapshot, Signal
-from services.chartedge_core.prompt_builder import SYSTEM_PROMPT_INDEX, SYSTEM_PROMPT_EQUITY, build_user_prompt
 from services.chartedge_core.strategies import EagleNiftyT315, FiveEMAScalping
 
 
@@ -23,14 +21,14 @@ class AIProvider(ABC):
         self.ai_config = ai_config
 
     @abstractmethod
-    async def complete(self, prompt: str, system_prompt: str) -> str:
+    async def complete(self, prompt: str, system_prompt: str, schema: dict[str, Any] | None = None) -> str:
         """Return raw model JSON text."""
 
 
 class AnthropicProvider(AIProvider):
     name = "anthropic"
 
-    async def complete(self, prompt: str, system_prompt: str) -> str:
+    async def complete(self, prompt: str, system_prompt: str, schema: dict[str, Any] | None = None) -> str:
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is missing")
@@ -58,6 +56,8 @@ class AnthropicProvider(AIProvider):
                         },
                         json=payload,
                     )
+                    if response.status_code >= 400:
+                        print(f"❌ Anthropic API Error Response: Status {response.status_code} - {response.text}")
                     response.raise_for_status()
                 return response.json()["content"][0]["text"]
             except (httpx.TimeoutException, httpx.HTTPStatusError, httpx.RequestError) as exc:
@@ -73,36 +73,37 @@ class AnthropicProvider(AIProvider):
 class OpenAIProvider(AIProvider):
     name = "openai"
 
-    async def complete(self, prompt: str, system_prompt: str) -> str:
+    async def complete(self, prompt: str, system_prompt: str, schema: dict[str, Any] | None = None) -> str:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY is missing")
  
-        schema = {
-            "type": "object",
-            "properties": {
-                "signal": {"type": "string", "enum": ["BUY", "SELL", "HOLD"]},
-                "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
-                "entry_zone": {
-                    "type": "object",
-                    "properties": {"low": {"type": "number"}, "high": {"type": "number"}},
-                    "required": ["low", "high"],
-                    "additionalProperties": False,
+        if schema is None:
+            schema = {
+                "type": "object",
+                "properties": {
+                    "signal": {"type": "string", "enum": ["BUY", "SELL", "HOLD"]},
+                    "confidence": {"type": "integer", "minimum": 0, "maximum": 100},
+                    "entry_zone": {
+                        "type": "object",
+                        "properties": {"low": {"type": "number"}, "high": {"type": "number"}},
+                        "required": ["low", "high"],
+                        "additionalProperties": False,
+                    },
+                    "stop_loss": {"type": "number"},
+                    "target_1": {"type": "number"},
+                    "target_2": {"type": "number"},
+                    "risk_reward_ratio": {"type": "number"},
+                    "reasoning": {"type": "string"},
+                    "warnings": {"type": "array", "items": {"type": "string"}},
+                    "invalidation": {"type": "string"},
                 },
-                "stop_loss": {"type": "number"},
-                "target_1": {"type": "number"},
-                "target_2": {"type": "number"},
-                "risk_reward_ratio": {"type": "number"},
-                "reasoning": {"type": "string"},
-                "warnings": {"type": "array", "items": {"type": "string"}},
-                "invalidation": {"type": "string"},
-            },
-            "required": [
-                "signal", "confidence", "entry_zone", "stop_loss", "target_1",
-                "target_2", "risk_reward_ratio", "reasoning", "warnings", "invalidation",
-            ],
-            "additionalProperties": False,
-        }
+                "required": [
+                    "signal", "confidence", "entry_zone", "stop_loss", "target_1",
+                    "target_2", "risk_reward_ratio", "reasoning", "warnings", "invalidation",
+                ],
+                "additionalProperties": False,
+            }
         payload = {
             "model": self.ai_config.get("openai_model", "gpt-4o-mini"),
             "messages": [
@@ -112,7 +113,7 @@ class OpenAIProvider(AIProvider):
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "chartedge_signal",
+                    "name": "chartedge_schema",
                     "strict": True,
                     "schema": schema,
                 }
@@ -148,11 +149,12 @@ class SignalEngine:
         self.ai_config = ai_config
         self.thresholds = thresholds
         self.ai_enabled = bool(ai_config.get("enabled", True))
-        self.debate_enabled = bool(ai_config.get("debate_enabled", False))
-        self.debate_min_confluence = float(ai_config.get("debate_min_confluence", 0.5))
         self.provider = self._provider(ai_config.get("provider", "openai"))
-        self.debate_engine = DebateEngine(self.provider)
         self.strategies: dict[str, dict[str, OptionStrategy]] = {}
+        self.last_rejection_time: dict[str, datetime] = {}
+        # Set when T315 structurally validates a breakout (regardless of AI outcome).
+        # symbol → (option_type "CE"/"PE", validated_date)
+        self.t315_direction_lock: dict[str, tuple[str, object]] = {}
 
     def _confirm_entry_momentum(self, direction: Direction, candles: list[Candle]) -> bool:
         """Require last 2 candles moving in trade direction to avoid chasing exhausted moves."""
@@ -177,15 +179,20 @@ class SignalEngine:
                 is_choppy = True
 
         # Dynamic threshold retrieval with per-symbol override
+        MAX_EFFECTIVE_THRESHOLD = 0.70
         base_thresh = self.thresholds.get(snapshot.instrument, self.thresholds.get("DEFAULT", 0.60))
-        buy_thresh = base_thresh * (1.25 if is_choppy else 1.0)
-        sell_thresh = -base_thresh * (1.25 if is_choppy else 1.0)
+        raw_thresh = base_thresh * (1.25 if is_choppy else 1.0)
+        buy_thresh = min(raw_thresh, MAX_EFFECTIVE_THRESHOLD)
+        sell_thresh = max(-raw_thresh, -MAX_EFFECTIVE_THRESHOLD)
 
         direction = consideration(
             snapshot.confluence_score,
-            min(buy_thresh, 0.95),
-            max(sell_thresh, -0.95),
+            buy_thresh,
+            sell_thresh,
         )
+        
+        # Diagnostic Log
+        print(f"🔍 [Engine] {snapshot.instrument} Confluence: {snapshot.confluence_score:.3f} | Thresholds: [{sell_thresh:.2f}, {buy_thresh:.2f}] | Decision: {direction.value}")
 
         # Entry momentum guard: confirm price is still moving in trade direction.
         # Prevents entering at exhaustion tops/bottoms after all lagging indicators align.
@@ -205,43 +212,7 @@ class SignalEngine:
         else:
             momentum_alert = None
 
-        if not self.ai_enabled:
-            return self._rule_based_signal(snapshot, candles, direction, "BACKTEST_RULE_BASED")
-
-        try:
-            use_debate = (
-                self.debate_enabled
-                and abs(snapshot.confluence_score) > self.debate_min_confluence
-            )
-            if use_debate:
-                raw = await self.debate_engine.run(
-                    snapshot, candles, "midday", momentum_alert=momentum_alert
-                )
-            else:
-                sys_prompt = SYSTEM_PROMPT_INDEX
-                if snapshot.instrument in ["RELIANCE", "HDFCBANK"]:
-                    sys_prompt = SYSTEM_PROMPT_EQUITY
-                prompt = build_user_prompt(snapshot, candles, "midday")
-                if momentum_alert:
-                    prompt = f"!!! {momentum_alert} !!!\n{prompt}\n\nURGENT: Validate the volume profile of this momentum spike before signaling."
-                raw = await self.provider.complete(prompt, sys_prompt)
-
-            signal = self._from_ai_json(snapshot, raw, self.provider.name)
-                
-            # AI HOLD always wins — don't enter if AI is uncertain
-            # AI HOLD always wins — don't enter if AI is uncertain
-            if signal.signal == Direction.HOLD:
-                return signal
-            if direction == Direction.HOLD:
-                return signal
-            if signal.signal != direction and not momentum_alert:
-                return self._rule_based_signal(snapshot, candles, direction, "AI_DIRECTION_MISMATCH")
-            return signal
-        except Exception as e:
-            print(f"⚠️ AI Signal Error: {e}")
-            import traceback
-            traceback.print_exc()
-            return self._rule_based_signal(snapshot, candles, direction, "AI_UNAVAILABLE")
+        return self._rule_based_signal(snapshot, candles, direction, "RULE_BASED")
 
     def _provider(self, provider: str) -> AIProvider:
         if provider == "openai":
@@ -285,61 +256,56 @@ class SignalEngine:
         
         strategies = self.strategies[symbol]
 
-        # 1. Update strategy states
+        # 1. Check for triggers (5EMA uses previous state before update)
+        ema5_trigger = strategies["ema5"].get_signal(candle, india_vix, latest_snapshot)
+
+        # 2. Update strategy states
         strategies["t315"].update(candle)
         strategies["ema5"].update(candle, candles)
 
-        # 2. Check for triggers
+        # 3. Check for triggers (T315 uses updated state)
         t315_trigger = strategies["t315"].get_signal(candle, india_vix)
-        trigger = t315_trigger or strategies["ema5"].get_signal(candle, india_vix)
+        trigger = t315_trigger or ema5_trigger
         
         if not trigger:
+            # Periodic health check print (every 5 mins per instrument)
+            if candle.time.minute % 5 == 0:
+                print(f"💤 [Strategy] {symbol} @ {candle.time.strftime('%H:%M')} - No Trigger (T315: {'YES' if t315_trigger else 'NO'}, 5EMA: {'YES' if ema5_trigger else 'NO'})")
             return None
 
-        base_signal = self._from_strategy_dict(trigger, candle)
-        
-        # If AI is disabled, accept strategy signal directly
-        if not self.ai_enabled:
-            return base_signal
-
-        # Use the latest indicator snapshot or fallback to base
-        snapshot = latest_snapshot or base_signal.indicator_snapshot
-            
-        # Run AI Debate/Review on the strategy-generated signal
-        try:
-            use_debate = self.debate_enabled
-            
-            momentum_alert = f"STRATEGY TRIGGER ({trigger['strategy']}): {trigger['reason']}"
-            
-            if use_debate:
-                print(f"🤖 [AI Debate] Reviewing strategy signal for {symbol} at {candle.time}...")
-                raw = await self.debate_engine.run(
-                    snapshot, candles, "midday", momentum_alert=momentum_alert
-                )
-            else:
-                print(f"🤖 [AI Single] Reviewing strategy signal for {symbol} at {candle.time}...")
-                sys_prompt = SYSTEM_PROMPT_INDEX
-                prompt = build_user_prompt(snapshot, candles, "midday")
-                prompt = f"!!! {momentum_alert} !!!\n{prompt}\n\nURGENT: Validate if this strategy setup is safe and high probability."
-                raw = await self.provider.complete(prompt, sys_prompt)
-
-            ai_signal = self._from_ai_json(snapshot, raw, self.provider.name)
-            
-            if ai_signal.signal == Direction.HOLD:
-                print(f"🛑 [AI Review] Strategy signal REJECTED: {ai_signal.reasoning}")
+        # Cooldown check to avoid spamming AI reviews on consecutive candles of the same setup
+        cooldown_key = f"{symbol}_{trigger['strategy']}_{trigger['option_type']}"
+        if cooldown_key in self.last_rejection_time:
+            cooldown_expiry = self.last_rejection_time[cooldown_key] + timedelta(minutes=15)
+            if candle.time < cooldown_expiry:
+                if candle.time.minute % 5 == 0:
+                    print(f"⏳ [Cooldown] Suppressing AI Review for {cooldown_key} at {candle.time.strftime('%H:%M')} (expires at {cooldown_expiry.strftime('%H:%M')})")
                 return None
-                
-            print(f"✅ [AI Review] Strategy signal CONFIRMED: {ai_signal.reasoning}")
-            # Retain strategy levels but update confidence, reasoning, and status from AI
-            base_signal.confidence = ai_signal.confidence
-            base_signal.reasoning = f"AI Confirmed ({trigger['strategy']}): {ai_signal.reasoning}"
-            base_signal.ai_model = ai_signal.ai_model
-            base_signal.ai_status = "CONFIRMED"
-            return base_signal
-            
-        except Exception as e:
-            print(f"⚠️ AI Review failed: {e}. Falling back to rule-based strategy signal.")
-            return base_signal
+
+        # Confluence alignment gate: reject if indicator confluence clearly opposes direction.
+        # T315/5EMA fires from price action, but if the broader indicator stack is opposite, skip.
+        if latest_snapshot and latest_snapshot.confluence_score != 0:
+            score = latest_snapshot.confluence_score
+            opt_type = trigger["option_type"]
+            # CE = bullish bet, needs non-negative confluence. PE = bearish bet, needs non-positive.
+            # Only reject on strong opposition (>0.25 in wrong direction) to avoid over-filtering.
+            if opt_type == "CE" and score < -0.25:
+                print(f"⛔ [Confluence Gate] {symbol} T315 CE blocked: confluence {score:.3f} strongly bearish")
+                return None
+            if opt_type == "PE" and score > 0.25:
+                print(f"⛔ [Confluence Gate] {symbol} T315 PE blocked: confluence {score:.3f} strongly bullish")
+                return None
+
+        base_signal = self._from_strategy_dict(trigger, candle)
+
+        # T315 structural breakout validated — lock direction for this symbol today.
+        # Disabled on Thursday (weekly expiry): morning false breakouts are common on expiry days.
+        if trigger["strategy"] == "T315" and candle.time.weekday() != 3:
+            self.t315_direction_lock[symbol] = (trigger["option_type"], candle.time.date())
+            print(f"🔒 [T315 Lock] {symbol}: {trigger['option_type']} breakout locked for {candle.time.date()}")
+
+        print(f"✅ [Strategy] {trigger['strategy']} signal accepted for {symbol} at {candle.time}: {trigger['reason']}")
+        return base_signal
 
     def _from_strategy_dict(self, trigger: dict, candle: Candle) -> Signal:
         """Convert a strategy trigger dictionary to a Signal object."""
@@ -394,7 +360,30 @@ class SignalEngine:
         )
 
     def _from_ai_json(self, snapshot: IndicatorSnapshot, raw: str, provider_name: str) -> Signal:
-        data = json.loads(raw)
+        cleaned_raw = raw.strip()
+        if "```" in cleaned_raw:
+            parts = cleaned_raw.split("```")
+            for part in parts:
+                part_strip = part.strip()
+                if part_strip.startswith("json"):
+                    cleaned_raw = part_strip[4:].strip()
+                    break
+                elif part_strip.startswith("{") and part_strip.endswith("}"):
+                    cleaned_raw = part_strip
+                    break
+        else:
+            start_idx = cleaned_raw.find("{")
+            end_idx = cleaned_raw.rfind("}")
+            if start_idx != -1 and end_idx != -1:
+                cleaned_raw = cleaned_raw[start_idx : end_idx + 1]
+        
+        try:
+            data = json.loads(cleaned_raw)
+        except json.JSONDecodeError as e:
+            print(f"❌ Failed to parse JSON from AI response: {e}")
+            print(f"=== RAW RESPONSE START ===\n{raw}\n=== RAW RESPONSE END ===")
+            raise e
+
         return Signal(
             created_at=datetime.now().astimezone(),
             instrument=snapshot.instrument,
@@ -425,7 +414,20 @@ class SignalEngine:
         )
         entry_low = min(last.close, last.close - (atr * 0.1))
         entry_high = max(last.close, last.close + (atr * 0.1))
-        if direction == Direction.SELL:
+        is_option_instrument = any(x in snapshot.instrument for x in ("-CE", "-PE", "_CE", "_PE"))
+        if is_option_instrument:
+            # Levels in option-premium domain; clamp SL to max 20% loss
+            if direction == Direction.SELL:
+                stop = max(last.close + (atr * 1.5), last.close * 1.20)
+                target_1 = last.close - (atr * 2.0)
+                target_2 = last.close - (atr * 3.0)
+            elif direction == Direction.BUY:
+                stop = max(last.close - (atr * 1.5), last.close * 0.80)
+                target_1 = last.close + (atr * 2.0)
+                target_2 = last.close + (atr * 3.0)
+            else:
+                stop = target_1 = target_2 = last.close
+        elif direction == Direction.SELL:
             stop = last.close + (atr * 1.2)
             target_1 = last.close - (atr * 1.8)
             target_2 = last.close - (atr * 2.6)

@@ -116,6 +116,48 @@ def supertrend(candles: Sequence[Candle], period: int = 7, multiplier: float = 3
     return {"value": round(st_val, 2), "direction": float(direction)}
 
 
+def adx(candles: Sequence[Candle], period: int = 14) -> float:
+    """Wilder's ADX — trend-strength gauge. >25 strong trend, <20 chop/range."""
+    if len(candles) < period * 2:
+        return 0.0
+    plus_dm: list[float] = []
+    minus_dm: list[float] = []
+    trs: list[float] = []
+    for i in range(1, len(candles)):
+        c, p = candles[i], candles[i - 1]
+        up = c.high - p.high
+        down = p.low - c.low
+        plus_dm.append(up if (up > down and up > 0) else 0.0)
+        minus_dm.append(down if (down > up and down > 0) else 0.0)
+        trs.append(max(c.high - c.low, abs(c.high - p.close), abs(c.low - p.close)))
+
+    # Wilder smoothing (RMA)
+    atr_s = sum(trs[:period])
+    pdm_s = sum(plus_dm[:period])
+    mdm_s = sum(minus_dm[:period])
+    dxs: list[float] = []
+    for i in range(period, len(trs)):
+        atr_s = atr_s - (atr_s / period) + trs[i]
+        pdm_s = pdm_s - (pdm_s / period) + plus_dm[i]
+        mdm_s = mdm_s - (mdm_s / period) + minus_dm[i]
+        if atr_s <= 0:
+            continue
+        pdi = 100 * (pdm_s / atr_s)
+        mdi = 100 * (mdm_s / atr_s)
+        denom = pdi + mdi
+        dx = 100 * abs(pdi - mdi) / denom if denom > 0 else 0.0
+        dxs.append(dx)
+    if not dxs:
+        return 0.0
+    # ADX = Wilder-smoothed DX
+    if len(dxs) < period:
+        return mean(dxs)
+    adx_val = mean(dxs[:period])
+    for dx in dxs[period:]:
+        adx_val = (adx_val * (period - 1) + dx) / period
+    return adx_val
+
+
 def vwap(candles: Sequence[Candle]) -> float:
     typical_x_volume = sum(((c.high + c.low + c.close) / 3) * c.volume for c in candles)
     volume = sum(c.volume for c in candles)
@@ -156,6 +198,7 @@ def compute_snapshot_indicators(
     vwap_vote = 0 if vwap_value <= 0 else 1 if last.close > vwap_value else -1 if last.close < vwap_value else 0
 
     atr_value = atr(candles)
+    adx_value = adx(candles)
     bb_value = bollinger(values)
     st = supertrend(candles)
     st_direction = int(st["direction"])
@@ -175,6 +218,7 @@ def compute_snapshot_indicators(
         "supertrend": IndicatorValue(value=st["value"], vote=supertrend_vote, state=_state(supertrend_vote), weight=get_w("supertrend", 0.25)),
         "volume": IndicatorValue(value={"current": last.volume, "ma20": round(volume_ma, 2)}, vote=volume_vote, state=_state(volume_vote), weight=get_w("volume", 0.10)),
         "atr": IndicatorValue(value=round(atr_value, 2), vote=0, state="REFERENCE", weight=0),
+        "adx": IndicatorValue(value=round(adx_value, 2), vote=0, state="TRENDING" if adx_value >= 20 else "CHOPPY", weight=0),
         "bollinger": IndicatorValue(value={k: round(v, 4) for k, v in bb_value.items()}, vote=0, state="REFERENCE", weight=0),
     }
 

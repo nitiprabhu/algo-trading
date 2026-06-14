@@ -12,7 +12,7 @@ import { SignalFeed } from "../components/SignalFeed";
 import { TradeLog } from "../components/TradeLog";
 import type { DashboardSnapshot } from "../lib/types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:7070";
 const WS_URL = API_URL.replace("http", "ws");
 
 export default function DashboardPage() {

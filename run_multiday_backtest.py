@@ -8,8 +8,8 @@ from services.chartedge_core.indstocks import IndstocksMarketRuntime
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# Dynamically generate dates for April 2026 (April 1st to April 30th)
-DATES = [f"2026-04-{day:02d}" for day in range(1, 31)]
+# Dynamically generate dates for May 2026 (May 4th to May 10th for a shorter test)
+DATES = [f"2026-06-{day:02d}" for day in [1, 2, 3, 4, 5, 8, 9, 10, 11, 12]]  # June 1-12, 2026 (Mon-Fri)
 
 async def run_date(date_str: str, enable_equity: bool = True):
     config_path = os.path.abspath("shared/config.yaml")
@@ -34,7 +34,7 @@ async def run_date(date_str: str, enable_equity: bool = True):
     results = await runtime.run_backtest(start, end)
 
     if results.get("status") == "error":
-        print(f"⚠️ Error running backtest for {date_str}: {results.get('reason')}")
+        print(f"⚠️ Error running backtest for {date_str}: {results}")
         return None
 
     total_candles = sum(v for k, v in results.items() if k != "status")

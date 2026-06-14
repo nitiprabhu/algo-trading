@@ -10,7 +10,7 @@ def _signal(direction: Direction = Direction.BUY, confidence: int = 75) -> Signa
     snapshot = IndicatorSnapshot(
         instrument="NIFTY",
         timeframe="1m",
-        candle_time=datetime.now(ZoneInfo("Asia/Kolkata")),
+        candle_time=datetime(2026, 5, 20, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
         price=100.0,
         indicators={},
         confluence_score=0.8,
@@ -34,7 +34,7 @@ def _signal(direction: Direction = Direction.BUY, confidence: int = 75) -> Signa
 
 def _candle(open_price: float, high: float, low: float, close: float) -> Candle:
     return Candle(
-        time=datetime.now(ZoneInfo("Asia/Kolkata")),
+        time=datetime(2026, 5, 20, 10, 0, tzinfo=ZoneInfo("Asia/Kolkata")),
         instrument="NIFTY",
         timeframe="1m",
         open=open_price,
@@ -46,7 +46,7 @@ def _candle(open_price: float, high: float, low: float, close: float) -> Candle:
 
 
 def test_confidence_floor_prevents_entry() -> None:
-    engine = PaperTradingEngine({"confidence_floor": 60, "notional_per_trade": 100000, "max_open_positions": 2}, skip_db_load=True)
+    engine = PaperTradingEngine({"confidence_floor": 60, "notional_per_trade": 100000, "max_open_positions": 2}, skip_db_load=True, is_backtesting=True)
 
     async def run_test():
         res = await engine.maybe_enter(_signal(confidence=55), _candle(100, 101, 99, 100))
@@ -57,7 +57,7 @@ def test_confidence_floor_prevents_entry() -> None:
 
 
 def test_t1_moves_stop_to_breakeven() -> None:
-    engine = PaperTradingEngine({"confidence_floor": 60, "notional_per_trade": 100000, "max_open_positions": 2}, skip_db_load=True)
+    engine = PaperTradingEngine({"confidence_floor": 60, "notional_per_trade": 100000, "max_open_positions": 2}, skip_db_load=True, is_backtesting=True)
 
     async def run_test():
         trade = await engine.maybe_enter(_signal(), _candle(100, 101, 99, 100))

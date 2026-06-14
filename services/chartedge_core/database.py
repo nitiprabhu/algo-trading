@@ -28,11 +28,10 @@ if not DATABASE_URL:
 else:
     print(f"DEBUG: database.py: DATABASE_URL found (length={len(DATABASE_URL)})")
 
-print("DEBUG: database.py: Creating engine with pool_pre_ping=True")
+print("DEBUG: database.py: Creating engine")
 engine = create_engine(
     DATABASE_URL, 
-    pool_pre_ping=True,
-    connect_args={"connect_timeout": 10}
+    connect_args={"connect_timeout": 30}
 )
 print("DEBUG: database.py: Engine created")
 

@@ -59,7 +59,7 @@ class DerivativeManager:
         
         return f"NFO:{int(current_fut['SECURITY_ID'])}"
 
-    def get_option_chain(self, spot_price: float, underlying: str = "NIFTY", range_strikes: int = 5) -> List[Dict]:
+    def get_option_chain(self, spot_price: float, underlying: str = "NIFTY", range_strikes: int = 5, current_dt: Optional[datetime] = None, expiry_buffer_days: int = 1) -> List[Dict]:
         if self._fno_df is None: self._fetch_fno_master()
         
         # Symbol-aware strike interval
@@ -78,8 +78,23 @@ class DerivativeManager:
         if opts.empty: return []
         
         opts['dt'] = pd.to_datetime(opts['EXPIRY_DATE'], errors='coerce')
-        opts['STRIKE_PRICE'] = pd.to_numeric(opts['STRIKE_PRICE'], errors='coerce')
-        near_opts = opts[opts['dt'] == opts['dt'].min()].copy()
+        unique_expiries = sorted(opts['dt'].dropna().unique())
+        if not unique_expiries:
+            return []
+            
+        target_expiry = unique_expiries[0]
+        if current_dt is not None and len(unique_expiries) > 1:
+            nearest_expiry_date = pd.Timestamp(unique_expiries[0]).date()
+            if hasattr(current_dt, "date"):
+                current_date = current_dt.date()
+            else:
+                current_date = pd.to_datetime(current_dt).date()
+                
+            dte = (nearest_expiry_date - current_date).days
+            if dte <= expiry_buffer_days:
+                target_expiry = unique_expiries[1]
+                
+        near_opts = opts[opts['dt'] == target_expiry].copy()
         
         chain = []
         for strike in strikes:
@@ -96,7 +111,7 @@ class DerivativeManager:
             })
         return chain
 
-    def get_atm_options(self, spot_price: float, underlying: str = "NIFTY") -> Dict[str, Dict]:
+    def get_atm_options(self, spot_price: float, underlying: str = "NIFTY", current_dt: Optional[datetime] = None, expiry_buffer_days: int = 1, strike_offset: int = 0) -> Dict[str, Dict]:
         if self._fno_df is None: self._fetch_fno_master()
         
         # Symbol-aware strike interval
@@ -115,25 +130,64 @@ class DerivativeManager:
         
         if opts.empty: return {}
         
-        # Filter for nearest expiry
+        # Filter for nearest/next expiry based on current date
         opts['dt'] = pd.to_datetime(opts['EXPIRY_DATE'], errors='coerce')
-        nearest_dt = opts['dt'].min()
-        near_opts = opts[opts['dt'] == nearest_dt].copy()
+        unique_expiries = sorted(opts['dt'].dropna().unique())
+        if not unique_expiries:
+            return {}
+            
+        target_expiry = unique_expiries[0]
+        if current_dt is None:
+            try:
+                from zoneinfo import ZoneInfo
+                IST = ZoneInfo("Asia/Kolkata")
+                current_dt = datetime.now(IST)
+            except Exception:
+                current_dt = datetime.now()
+
+        if len(unique_expiries) > 1:
+            nearest_expiry_date = pd.Timestamp(unique_expiries[0]).date()
+            if hasattr(current_dt, "date"):
+                current_date = current_dt.date()
+            else:
+                current_date = pd.to_datetime(current_dt).date()
+                
+            dte = (nearest_expiry_date - current_date).days
+            if dte <= expiry_buffer_days:
+                target_expiry = unique_expiries[1]
+                
+        near_opts = opts[opts['dt'] == target_expiry].copy()
         
-        # Extract specific SECURITY_ID for both Call (CE) and Put (PE)
-        atm_opts = near_opts[near_opts['STRIKE_PRICE'] == atm_strike]
+        # Apply strike offset for ATM/ITM selection
+        ce_strike = atm_strike - (strike_offset * interval)
+        pe_strike = atm_strike + (strike_offset * interval)
         
+        # Extract Call (CE) at ce_strike and Put (PE) at pe_strike
+        ce_rows = near_opts[(near_opts['OPTION_TYPE'] == 'CE') & (near_opts['STRIKE_PRICE'] == ce_strike)]
+        pe_rows = near_opts[(near_opts['OPTION_TYPE'] == 'PE') & (near_opts['STRIKE_PRICE'] == pe_strike)]
+        
+        # Fallback to ATM if ITM strike is not found
+        if ce_rows.empty:
+            ce_rows = near_opts[(near_opts['OPTION_TYPE'] == 'CE') & (near_opts['STRIKE_PRICE'] == atm_strike)]
+        if pe_rows.empty:
+            pe_rows = near_opts[(near_opts['OPTION_TYPE'] == 'PE') & (near_opts['STRIKE_PRICE'] == atm_strike)]
+            
         res = {}
-        for _, row in atm_opts.iterrows():
-            # Use NFO: prefix as per PRD for F&O WebSocket compatibility
-            opt_type = row['OPTION_TYPE']
-            res[opt_type] = {
+        for _, row in ce_rows.iterrows():
+            res['CE'] = {
                 "token": f"NFO:{int(row['SECURITY_ID'])}",
                 "symbol": row['TRADING_SYMBOL'],
                 "expiry": row['EXPIRY_DATE'],
                 "strike": float(row['STRIKE_PRICE'])
             }
-        
+        for _, row in pe_rows.iterrows():
+            res['PE'] = {
+                "token": f"NFO:{int(row['SECURITY_ID'])}",
+                "symbol": row['TRADING_SYMBOL'],
+                "expiry": row['EXPIRY_DATE'],
+                "strike": float(row['STRIKE_PRICE'])
+            }
+            
         return res
 
 if __name__ == "__main__":

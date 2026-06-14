@@ -22,6 +22,14 @@ class Config(BaseModel):
     indicator_weights: dict[str, dict[str, float]]
     ai: dict[str, Any]
     risk: dict[str, Any]
+    expiry_map: dict[str, Any] = {}
+    iv_rank: dict[str, Any] = {}
+    costs: dict[str, Any] = {}
+    options_structure: dict[str, Any] = {}
+
+    @property
+    def costs_config(self) -> dict[str, Any]:
+        return self.costs
 
     @property
     def enabled_symbols(self) -> list[str]:
@@ -66,8 +74,10 @@ def sync_config_to_db(config: Config):
 
 def apply_db_overrides(config: Config):
     """Apply database parameters over the static config."""
+    if os.environ.get("SKIP_DB_OVERRIDES") == "1":
+        return
+
     from services.chartedge_core.database import get_all_parameters
-    
     try:
         params = get_all_parameters()
         if not params:

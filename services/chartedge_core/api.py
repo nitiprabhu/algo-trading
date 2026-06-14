@@ -35,6 +35,10 @@ async def lifespan(app: FastAPI):
     # Run sync and run loop in background
     asyncio.create_task(runtime.run())
     
+    # Initialize Telegram Chat ID resolution on startup
+    from services.chartedge_core.telegram import notifier
+    asyncio.create_task(notifier.resolve_chat_id())
+    
     # Background config sync in a thread to avoid blocking the event loop
     if os.getenv("DATABASE_URL"):
         async def background_sync():
@@ -83,7 +87,7 @@ def debug_option(symbol: str = "NIFTY", side: str = "BUY") -> dict:
     data = runtime._get_options_data(symbol)
     
     # Also test contract resolution
-    contract = runtime.get_option_contract(symbol, side)
+    structure = runtime.get_multi_leg_structure(symbol, side)
     
     return {
         "symbol": symbol,
@@ -91,7 +95,7 @@ def debug_option(symbol: str = "NIFTY", side: str = "BUY") -> dict:
         "pcr": data.pcr if data else 0,
         "resistance_wall": data.resistance_wall if data else 0,
         "support_wall": data.support_wall if data else 0,
-        "resolved_contract": contract,
+        "resolved_structure": structure,
         "chain": data.chain if data else []
     }
 
@@ -191,4 +195,5 @@ async def websocket(websocket: WebSocket) -> None:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=7000)
+

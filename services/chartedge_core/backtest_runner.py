@@ -4,7 +4,8 @@ from datetime import datetime, timedelta
 import json
 import statistics
 
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = "http://127.0.0.1:7000"
+
 
 async def run_multi_day_backtest(start_date_str, end_date_str):
     start_date = datetime.strptime(start_date_str, "%Y-%m-%d")

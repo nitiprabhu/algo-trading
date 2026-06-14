@@ -57,11 +57,11 @@ market_hours:
   square_off: "15:00"
 
 confluence_thresholds:
-  NIFTY: 0.55
-  BANKNIFTY: 0.55
-  RELIANCE: 0.55
-  HDFCBANK: 0.55
-  DEFAULT: 0.55
+  NIFTY: 0.50
+  BANKNIFTY: 0.50
+  RELIANCE: 0.50
+  HDFCBANK: 0.50
+  DEFAULT: 0.50
 
 indicator_weights:
   NIFTY:
@@ -80,17 +80,12 @@ indicator_weights:
     volume: 0.10
 
 ai:
-  provider: openai
+  provider: anthropic
   fallback_provider: rule_based
-  model: gpt-4o-mini
+  model: claude-sonnet-4-20250514
   openai_model: gpt-4o-mini
   temperature: 0.1
   max_tokens: 500
-  # Bull/Bear debate: 3 LLM calls per signal instead of 1.
-  # Higher quality decisions at ~3x cost and ~3x latency.
-  # Use on high-confluence setups or lower-frequency instruments.
-  debate_enabled: false
-  debate_min_confluence: 0.5  # debate only fires when |confluence_score| > this
 
 risk:
   total_capital: 500000
@@ -98,7 +93,70 @@ risk:
   max_open_positions: 2
   max_signals_per_instrument_per_hour: 3
   confidence_floor: 60
+  options_confidence_buffer: 5  # options require confidence_floor + this to filter theta-bleed entries
+  options_max_loss_pct: 10.0    # tightened to cut losses faster in chop
+  options_trail_arm_pct: 15.0   # arm peak-trail once unrealized gain reaches this %
+  options_trail_keep_frac: 0.70 # lock this fraction of peak MFE as trailed SL
+  cooldown_after_losses: 2      # cooldown window after N consecutive same-day losses (was 3)
+  daily_halt_after_losses: 4    # halt all new entries for the day after N consecutive losses (was 7)
+  trade_only_trending: true     # prior-day regime gate to block chop days
+  options_directional_filter: false # DISABLED — tested Mar+Apr+May deterministically: option entries are already
+                                    # trend-aligned by confluence (every CE has ema50>ema200), so a directional veto
+                                    # never fires; the trend-strength variant removed net WINNERS (April -6.9k→-11.4k).
+                                    # Kept as a config switch (off) for reference; do not re-enable without new evidence.
+  dir_filter_min_sep_pct: 0.10
+  options_min_trend_sep_pct: 0.10
+  strategy_adx_gate: true       # apply intraday ADX trend gate to 5EMA/T315 strategy scalps
+  adx_min_trend: 30.0           # min ADX for an entry — above 30 indicates strong trend, filters chop
   daily_drawdown_pause_pct: 5.0
   stale_feed_seconds: 60
   price_deviation_guard_pct: 5.0
   timeframe_mins: 15
+  options_expiry_buffer_days: 1
+  options_strike_offset: 1  # 1 = ITM (delta ~0.65); 0 = ATM; -1 = OTM
+  options_min_premium: 80.0 # Filter out cheap options where spreads dominate edge
+
+# NSE weekly expiry day per instrument (Python weekday: 0=Mon, 1=Tue, ..., 3=Thu)
+# NIFTY moved to Tuesday 2024-09; BANKNIFTY scrapped weeklies.
+# Monthly expiry is always the last Thursday regardless of this map.
+expiry_map:
+  # NSE 2026: NIFTY weekly = Tuesday; monthly = last Tuesday. BANKNIFTY weeklies were
+  # discontinued (2024) — monthly only, last Tuesday. Verified against live Zerodha
+  # instrument list (e.g. BANKNIFTY26APR…→2026-04-28 Tue, NIFTY weekly 2026-05-05 Tue).
+  NIFTY:
+    weekly_weekday: 1       # Tuesday
+    monthly_weekday: 1      # last Tuesday of month
+  BANKNIFTY:
+    weekly_weekday: null    # no weekly — monthly only
+    monthly_weekday: 1      # last Tuesday of month
+  DEFAULT:
+    weekly_weekday: 1       # Tuesday fallback
+
+# IV rank bands (based on rolling INDIAVIX history)
+iv_rank:
+  high_threshold: 70.0     # IV rank above this → prefer selling / debit-spreads
+  low_threshold: 30.0      # IV rank below this → prefer buying
+  lookback_days: 60        # trading days for rolling VIX range
+
+# NSE F&O transaction costs — applied to every trade
+costs:
+  enabled: true
+  brokerage_per_order: 20.0   # ₹20 flat
+  stt_sell_pct: 0.001         # 0.1% on sell-side options turnover
+  nse_txn_charge_pct: 0.00053
+  sebi_fee_per_crore: 10.0
+  gst_rate: 0.18
+  stamp_duty_buy_pct: 0.00003
+  # Realistic bid-ask spreads for ATM options (entry + exit each pay half-spread).
+  # NIFTY ATM weekly: 3-5pts. BANKNIFTY ATM weekly: 5-8pts.
+  default_spread:
+    NIFTY: 4.0
+    BANKNIFTY: 6.0
+    DEFAULT: 4.0
+
+# Option structure selection
+options_structure:
+  allow_margin: false          # set true when SPAN margin available
+  prefer_itm: true             # buy ITM (strike_offset=1) on trend days
+  itm_delta_target: 0.65       # approximate delta we aim for on ITM buys
+  # short-premium structures (strangle, condor) are disabled until margin enabled

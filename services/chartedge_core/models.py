@@ -77,6 +77,7 @@ class IndicatorSnapshot(BaseModel):
     higher_timeframe: Dict[str, str] = Field(default_factory=dict)
     market_context: Optional[MarketContext] = None
     options_data: Optional[OptionChainData] = None
+    regime_info: Optional[Dict[str, Any]] = Field(default=None, exclude=True)
 
 
 class EntryZone(BaseModel):
@@ -103,14 +104,25 @@ class Signal(BaseModel):
     ai_status: str = "OK"
     strategy_name: str = "CONFLUENCE"
     option_type: Optional[str] = None
+    entry_delta: Optional[float] = None  # BS delta at entry, used for SL/T1/T2 translation
+    legs: List[Dict[str, Any]] = Field(default_factory=list)  # Store resolved legs
 
+
+class LegExecution(BaseModel):
+    instrument: str
+    action: Direction  # BUY or SELL
+    ratio: int
+    entry_price: float
+    strike: float = 0.0
+    option_type: str = "CE"
+    exit_price: Optional[float] = None
 
 class PaperTrade(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     signal_id: UUID
-    instrument: str
+    instrument: str  # Can be a composite name like "DEBIT_SPREAD:NIFTY-..."
     direction: Direction
-    entry_price: float
+    entry_price: float  # Net premium
     entry_time: datetime
     quantity: int
     underlying_entry_price: Optional[float] = None
@@ -127,6 +139,10 @@ class PaperTrade(BaseModel):
     invested_amount: float = 0.0
     t1_hit: bool = False
     highest_pnl_pct: float = 0.0
+    costs_paid: float = 0.0
+    price_source: Optional[str] = None
+    strategy_name: str = "NAKED_BUY"
+    legs: List[LegExecution] = Field(default_factory=list)
 
 
 class DashboardSnapshot(BaseModel):

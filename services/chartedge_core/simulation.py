@@ -13,8 +13,10 @@ from services.chartedge_core.config import Config
 from services.chartedge_core.confluence import score
 from services.chartedge_core.indicators import compute_snapshot_indicators
 from services.chartedge_core.models import Candle, DashboardSnapshot, Direction, IndicatorSnapshot, Signal
+from services.chartedge_core.option_data import bs_price, bs_delta, iv_from_vix
 from services.chartedge_core.paper_trading import PaperTradingEngine
 from services.chartedge_core.training_logger import training_logger, options_logger
+from services.chartedge_core.regime_detector import RegimeDetector
 
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -34,12 +36,21 @@ class MarketSimulator:
             symbol: deque(maxlen=260) for symbol in config.enabled_symbols
         }
         self.feed_health = "WARMING"
-        self.trader = PaperTradingEngine(config.risk, skip_db_load=skip_db_load)
+        self.trader = PaperTradingEngine(
+            config.risk,
+            skip_db_load=skip_db_load,
+            expiry_map=getattr(config, "expiry_map", {}),
+            costs_config=getattr(config, "costs_config", {}),
+        )
         self.signal_engine = SignalEngine(config.ai, config.confluence_thresholds)
         self.last_signal_times: dict[tuple[str, str], datetime] = {}
         self._running = False
         self.is_seeding = False
         self.is_backtesting = False
+        self._last_trading_date: object = None
+        self.regime_detectors: dict[str, RegimeDetector] = {
+            symbol: RegimeDetector() for symbol in config.enabled_symbols
+        }
 
     async def seed(self) -> None:
         now = datetime.now(IST).replace(second=0, microsecond=0) - timedelta(minutes=180)
@@ -124,13 +135,73 @@ class MarketSimulator:
         """Stub for resolving options - overridden in IndstocksMarketRuntime."""
         return None
 
+    def get_multi_leg_structure(self, symbol: str, direction: str) -> Optional[dict]:
+        """Stub for resolving multi-leg options - overridden in IndstocksMarketRuntime."""
+        return None
+
+    def _structure_allows_entry(self, symbol: str, direction: str) -> bool:
+        """Return False to block an option entry. Override in live runtime for regime gating."""
+        return True
+
+    def _get_structure_strike_offset(self, symbol: str) -> int:
+        """Return regime-aware strike offset. Override in live runtime."""
+        return int(self.config.risk.get("options_strike_offset", 0))
+
+    @staticmethod
+    def _last_weekday_of_month(year: int, month: int, weekday: int):
+        """Date of the last <weekday> (0=Mon..6=Sun) in a given month."""
+        import calendar as _cal
+        last = _cal.monthrange(year, month)[1]
+        for day in range(last, last - 7, -1):
+            if datetime(year, month, day).weekday() == weekday:
+                return datetime(year, month, day).date()
+        return datetime(year, month, last).date()
+
+    def _dte_to_expiry(self, symbol: str, now: datetime) -> float:
+        """Real days-to-expiry for the nearest contract per NSE rules (config expiry_map).
+
+        Replaces the old flat `dte = 7`. NIFTY = weekly Tuesday; BANKNIFTY = monthly
+        (last Tuesday, no weekly). Includes the intraday fraction still to run so theta
+        is right on/near expiry day. Falls back to 3 days if no map.
+        """
+        underlying = ("BANKNIFTY" if "BANKNIFTY" in symbol.upper()
+                      else "NIFTY" if "NIFTY" in symbol.upper() else symbol.upper())
+        emap = getattr(self.trader, "expiry_map", {}) or {}
+        cfg = emap.get(underlying, emap.get("DEFAULT", {"weekly_weekday": 1, "monthly_weekday": 1}))
+        d = now.date()
+        weekly_wd = cfg.get("weekly_weekday")
+        if weekly_wd is not None:
+            expiry = d + timedelta(days=(weekly_wd - d.weekday()) % 7)
+        else:
+            monthly_wd = cfg.get("monthly_weekday", 1)
+            expiry = self._last_weekday_of_month(d.year, d.month, monthly_wd)
+            if expiry < d:
+                ny, nm = (d.year + 1, 1) if d.month == 12 else (d.year, d.month + 1)
+                expiry = self._last_weekday_of_month(ny, nm, monthly_wd)
+        # fraction of the current trading day (to ~15:30) still remaining
+        frac = max(0.0, (15.5 - (now.hour + now.minute / 60.0))) / 24.0
+        return max(0.2, (expiry - d).days + frac)
+
     async def process_closed_candle(self, candle: Candle) -> None:
         if candle.time.minute % 30 == 0:
             print(f"DEBUG: Processing candles at {candle.time}...")
         symbol = candle.instrument
         self.candles[symbol].append(candle)
         self.market_data_history[symbol].append({"time": candle.time.isoformat(), "price": candle.close})
-        
+
+        # Day-boundary reset: clear per-day state when date changes (multi-day backtest support)
+        candle_date = candle.time.date()
+        if self._last_trading_date != candle_date:
+            if self._last_trading_date is not None:
+                print(f"📅 New trading day {candle_date} — resetting daily state (kill_switch, T315 lock, loss streak)")
+                self.trader.kill_switch_enabled = False
+                self.trader.queued_signals.clear()
+                self.trader.consecutive_losses = 0
+                self.trader.cooldown_until = None
+                self.trader.blocked_directions.clear()
+                self.signal_engine.t315_direction_lock.clear()
+            self._last_trading_date = candle_date
+
         # Only trading symbols can have positions and signals
         if symbol in self.config.trading_symbols:
             snapshot = self.latest_indicators.get(symbol)
@@ -160,10 +231,20 @@ class MarketSimulator:
             vix_val = self.candles.get("INDIAVIX")[-1].close if self.candles.get("INDIAVIX") else 0.0
             fo_signal = await self.signal_engine.get_fo_signal(candle, list(self.candles[symbol]), vix_val, snapshot)
             if fo_signal:
+                # Intraday ADX trend gate for strategy scalps (5EMA/T315).
+                # Prior-day regime mislabels intraday trend days as chop; use live ADX instead.
+                # Option-buying scalps bleed on no-trend bars — require real intraday momentum.
+                if self.config.risk.get("strategy_adx_gate", True):
+                    adx_ind = snapshot.indicators.get("adx") if snapshot else None
+                    adx_min = self.config.risk.get("adx_min_trend", 20.0)
+                    if adx_ind is not None and 0 < adx_ind.value < adx_min:
+                        print(f"🚫 [ADX Gate] {symbol}: {fo_signal.strategy_name} blocked — ADX {adx_ind.value:.1f} < {adx_min} (no intraday trend)")
+                        return
+
                 # Rate Limit Guard
                 if self._is_rate_limited(symbol, fo_signal.strategy_name, candle.time):
                     return
-                
+
                 # Silence signals during seeding (initial startup) to avoid dashboard spam.
                 # But allow them if we are explicitly in backtesting mode.
                 if not self.is_backtesting and (datetime.now(IST) - candle.time).total_seconds() > 300:
@@ -205,7 +286,14 @@ class MarketSimulator:
 
         weights = self.config.indicator_weights.get(symbol, {})
         indicators = compute_snapshot_indicators(candles_agg, weights)
-        
+
+        # Update RegimeDetector with latest vol/trend metrics
+        vix_val = self.candles.get("INDIAVIX")[-1].close if self.candles.get("INDIAVIX") else 16.0
+        atr_val = indicators.get("atr").value if indicators.get("atr") else 0.0
+        adx_val = indicators.get("adx").value if indicators.get("adx") else 0.0
+        self.regime_detectors[symbol].update(candle.time, vix_val, atr_val, adx_val)
+        regime_summary = self.regime_detectors[symbol].summary()
+
         snapshot = IndicatorSnapshot(
             instrument=symbol,
             timeframe=f"{interval_mins}m",
@@ -216,6 +304,7 @@ class MarketSimulator:
             higher_timeframe=self._higher_timeframe(symbol),
             market_context=self._get_market_context(),
             options_data=self._get_options_data(symbol),
+            regime_info=regime_summary,
         )
         self.latest_indicators[symbol] = snapshot
         training_logger.log_snapshot(snapshot)
@@ -226,6 +315,27 @@ class MarketSimulator:
         if signal.signal != Direction.HOLD:
              print(f"📡 SIGNAL ({symbol}): {signal.signal} Confidence: {signal.confidence}%")
         
+        # ADX Trend Gate: skip confluence entries on choppy/no-trend bars (options bleed in chop)
+        if signal.signal != Direction.HOLD:
+            adx_ind = snapshot.indicators.get("adx") if snapshot else None
+            adx_min = self.config.risk.get("adx_min_trend", 20.0)
+            if adx_ind is not None and 0 < adx_ind.value < adx_min:
+                print(f"🚫 [ADX Gate] {symbol}: {signal.signal.value} blocked — ADX {adx_ind.value} < {adx_min} (no trend)")
+                return
+
+        # T315 Direction Lock Guard: block confluence entries opposite to today's T315 breakout
+        if signal.signal != Direction.HOLD:
+            lock = self.signal_engine.t315_direction_lock.get(symbol)
+            if lock:
+                locked_opt, locked_date = lock
+                if locked_date == candle_date:
+                    # CE lock → only BUY signals allowed; PE lock → only SELL signals allowed
+                    conflict = (locked_opt == "CE" and signal.signal == Direction.SELL) or \
+                               (locked_opt == "PE" and signal.signal == Direction.BUY)
+                    if conflict:
+                        print(f"🚫 [T315 Lock] {symbol}: confluence {signal.signal.value} blocked — T315 {locked_opt} breakout active today")
+                        return
+
         # Rate Limit Guard
         if signal.signal != Direction.HOLD:
             if self._is_rate_limited(symbol, "CONFLUENCE", candle.time):
@@ -288,48 +398,75 @@ class MarketSimulator:
             volume=0,
         )
 
+        # T315 regime gates (before option proxying):
+        # 1. Block T315 on RANGE_BOUND_CHOP — ORB momentum fails on range-bound days.
+        # 2. Block T315 when its direction contradicts the regime options_bias.
+        strategy_name = getattr(signal, 'strategy_name', None)
+        if strategy_name == 'T315' and symbol in ["NIFTY", "BANKNIFTY"]:
+            regime = getattr(self, '_regime_by_symbol', {}).get(symbol, "")
+            if regime == "RANGE_BOUND_CHOP":
+                print(f"⛔ [T315 Regime] {symbol} T315 blocked — RANGE_BOUND_CHOP (ORB momentum unreliable)")
+                return
+            opt_type = getattr(signal, 'option_type', None)
+            bias = self.trader.risk_config.get(f"options_bias_{symbol}", "NEUTRAL")
+            if bias != "NEUTRAL" and opt_type and opt_type != bias:
+                print(f"⛔ [T315 Bias] {symbol} T315 {opt_type} blocked — regime bias is {bias}")
+                return
+
         # OPTIONS PROXY LOGIC: Check for ATM option contract if it's a trading index
         if symbol in ["NIFTY", "BANKNIFTY"] and signal.signal != Direction.HOLD:
+            preferred_side_check = signal.option_type if signal.option_type else signal.signal.value
+            if not self._structure_allows_entry(symbol, preferred_side_check):
+                print(f"🚫 [Structure Gate] {symbol} {preferred_side_check} blocked by regime/IV filter")
+                return
             # If the signal has an explicit option_type (CE/PE), use it. Otherwise fallback to sentiment.
             preferred_side = signal.option_type if signal.option_type else signal.signal.value
-            opt_contract = self.get_option_contract(symbol, preferred_side)
+            multi_leg = self.get_multi_leg_structure(symbol, preferred_side)
             
-            # Resolve premium: Use LTP if available, fallback to proxy price (~1.2% of spot) for seeding/backtests
-            premium = opt_contract.get("ltp", 0) if opt_contract else 0
-            if premium <= 0:
-                # Institutional Proxy: ATM Options usually trade around 1.0-1.5% of spot
-                premium = round(candle.close * 0.012, 2)
-            
-            if opt_contract:
-                print(f"🎯 Creating Option Trade for {symbol}: {opt_contract['symbol']} @ {premium}")
-                # Clone signal and next_open for the option
+            if multi_leg and multi_leg.get("legs"):
+                print(f"🎯 Creating Multi-Leg Trade for {symbol}: {multi_leg['strategy_name']}")
                 opt_signal = signal.model_copy()
-                opt_signal.id = uuid.uuid4() # Generate NEW unique ID for the option signal
-                opt_signal.instrument = opt_contract["symbol"]
-                opt_signal.signal = Direction.BUY  # We always BUY the option contract (long CE/PE) to profit from underlying momentum
+                opt_signal.id = uuid.uuid4()
+                opt_signal.instrument = f"{multi_leg['strategy_name']}:{symbol}"
+                opt_signal.strategy_name = multi_leg["strategy_name"]
                 
-                # PRD: Translate Index SL/Targets to Option Premium Levels (Delta Proxy = 0.5)
-                delta = 0.5
-                # For CE: price moves with underlying. For PE: price moves opposite.
-                is_pe = "-PE" in opt_signal.instrument or "_PE" in opt_signal.instrument
-                if is_pe:
-                     opt_signal.stop_loss = round(premium + (signal.stop_loss - candle.close) * -delta, 2)
-                     opt_signal.target_1 = round(premium + (signal.target_1 - candle.close) * -delta, 2)
-                     opt_signal.target_2 = round(premium + (signal.target_2 - candle.close) * -delta, 2)
-                else:
-                     opt_signal.stop_loss = round(premium + (signal.stop_loss - candle.close) * delta, 2)
-                     opt_signal.target_1 = round(premium + (signal.target_1 - candle.close) * delta, 2)
-                     opt_signal.target_2 = round(premium + (signal.target_2 - candle.close) * delta, 2)
+                resolved_legs = []
+                net_premium = 0.0
+                est_delta = 0.0
                 
-                print(f"🎯 Translated Option Levels for {opt_signal.instrument}: SL={opt_signal.stop_loss}, T1={opt_signal.target_1}, T2={opt_signal.target_2}")
+                for leg in multi_leg["legs"]:
+                    premium = leg["ltp"]
+                    delta = 0.5
+                    if premium <= 0:
+                        vix = self._token_ltp.get("40000107") or self._token_ltp.get("INDIAVIX") or 14.0
+                        if self.candles.get("INDIAVIX"):
+                            vix = self.candles["INDIAVIX"][-1].close
+                        opt_type = leg["option_type"]
+                        strike = leg.get("strike", candle.close)
+                        dte = self._dte_to_expiry(symbol, candle.time)
+                        iv = iv_from_vix(vix, dte)
+                        premium = bs_price(candle.close, strike, dte, iv, opt_type)
+                        delta = bs_delta(candle.close, strike, dte, iv, opt_type)
+                        
+                    leg["entry_price"] = premium
+                    resolved_legs.append(leg)
+                    multiplier = 1 if leg["action"] == "BUY" else -1
+                    net_premium += (premium * leg.get("ratio", 1) * multiplier)
+                    est_delta += (abs(delta) * leg.get("ratio", 1) * multiplier)
+                    
+                opt_signal.legs = resolved_legs
+                opt_signal.entry_delta = abs(est_delta)
+                opt_signal.signal = Direction.SELL if net_premium < 0 else Direction.BUY
+
                 
-                from services.chartedge_core.models import EntryZone
-                opt_signal.entry_zone = EntryZone(low=round(premium * 0.98, 2), high=round(premium * 1.02, 2))
-                opt_signal.reasoning = f"Option Proxy for {symbol}: {signal.reasoning}"
+                # Update SL and targets for the overall structure (optional mapping via delta proxy if needed)
+                # For Multi-Leg, since maybe_enter applies direction and delta internally to compute exit targets,
+                # we pass down the absolute net_premium as the baseline.
+                # Actually, maybe_enter handles SL/T1/T2 conversion inside paper_trading.py using `entry_delta`.
                 
                 opt_open = next_open.model_copy()
-                opt_open.instrument = opt_contract["symbol"]
-                opt_open.open = premium
+                opt_open.instrument = opt_signal.instrument
+                opt_open.open = net_premium
                 
                 # Add the option signal to the history list
                 self.signals.insert(0, opt_signal)

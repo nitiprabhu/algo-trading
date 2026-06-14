@@ -17,7 +17,7 @@ export default function OptionsPage() {
   const [directions, setDirections] = useState<("BUY" | "SELL")[]>(["BUY"]);
   
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
-  const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:7070";
 
   // Sync strategy presets
   useEffect(() => {

@@ -7,14 +7,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Backend**
 ```bash
 pip install -e ".[dev]"
-uvicorn services.chartedge_core.api:app --reload --port 8000
+uvicorn services.chartedge_core.api:app --reload --port 7000
 ```
 
 **Frontend**
 ```bash
 cd frontend
 npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
+NEXT_PUBLIC_API_URL=http://localhost:7070 npm run dev
 ```
 
 **Tests**
@@ -32,6 +32,10 @@ ruff format .
 **Backtest**
 ```bash
 python run_today_backtest.py           # today's data backtest
+python run_weekly_backtest.py          # current week
+python run_monthly_backtest.py         # full month
+python run_regime_agent_backtest.py    # regime-aware threshold test
+python run_trio_comparison.py          # compare AI debate / no-AI / options strategies
 python services/chartedge_core/backtest_runner.py  # full backtest runner
 ```
 
@@ -64,6 +68,14 @@ Single-process FastAPI backend (`services/chartedge_core/api.py`) runs everythin
 
 **`derivative_manager.py`** — resolves nearest-expiry F&O instrument tokens for NIFTY/BANKNIFTY options/futures via INDstocks lookup; called by `indstocks.py` at startup.
 
+**`debate.py`** — multi-agent AI debate layer. Bull analyst, bear analyst, and judge LLM calls run sequentially. Judge emits final `Signal` JSON. Called from `ai_signal.py` when `ai.use_debate: true` in config.
+
+**`regime_agent.py` / `AIRegimeAgent`** — classifies market regime (TRENDING_BULLISH/BEARISH, RANGE_BOUND_CHOP, MEAN_REVERTING) from prior-day candles and sets `confluence_threshold` dynamically before session start. Called by backtest runners and `indstocks.py`.
+
+**`strategies.py`** — rule-based options strategies (`EagleNiftyT315`, `BreakoutScalper`) that run independently of the AI pipeline. `EagleNiftyT315` captures 09:15–09:30 range breakouts; VIX must be 14–18. Used in comparison backtests.
+
+**`telegram.py`** — `TelegramNotifier` sends trade entry/exit alerts. Resolves chat ID automatically via `/getUpdates` at startup if `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` env vars are present.
+
 **`optimization.py`** — offline weight/threshold tuner using backtest P&L as objective; not called from the live runtime.
 
 **`training_logger.py`** — appends signal outcomes to `logs/` for future ML training; called from `paper_trading.py` when a trade closes.
@@ -81,5 +93,25 @@ Single-process FastAPI backend (`services/chartedge_core/api.py`) runs everythin
 | `ANTHROPIC_API_KEY` | Enables Claude reasoning; absent → `AI_UNAVAILABLE` fallback |
 | `OPENAI_API_KEY` | Alternative AI provider |
 | `DATABASE_URL` | PostgreSQL URL; absent → SQLite `chartedge.db` |
+| `TELEGRAM_BOT_TOKEN` | Bot token for trade alerts |
+| `TELEGRAM_CHAT_ID` | Target chat; auto-resolved from `/getUpdates` if absent |
 
 Copy `.env.example` to `.env` for local secrets; `python-dotenv` loads it automatically.
+
+## Backtesting patterns
+
+Root-level `run_*.py` scripts are standalone backtest runners — each passes a date range and config overrides to `backtest_runner.py` or `backtest_direct.py`. Comparison scripts (e.g., `run_trio_comparison.py`) run multiple strategy variants and print a side-by-side summary. Results write to `backtest_analysis*.json` and/or log files in the root.
+
+`is_backtesting=True` on `PaperTradingEngine` skips DB reads/writes and order rate-limiting. `skip_db_load=True` skips recovering open trades from the DB.
+
+## AI pipeline variants
+
+Three modes, selected at runtime/backtest time:
+
+| Mode | Config / flag | Description |
+|------|--------------|-------------|
+| Rule-based | No API key | `rule_based` fallback; no LLM call |
+| Single AI | `ai.use_debate: false` | One LLM call per tick via `AnthropicProvider` or `OpenAIProvider` |
+| Debate | `ai.use_debate: true` | Bull → Bear → Judge, three sequential LLM calls; higher latency, higher conviction |
+
+`AIRegimeAgent` runs once pre-session and overrides `confluence_thresholds` in config for that day.

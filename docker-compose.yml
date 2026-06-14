@@ -2,9 +2,9 @@ services:
   api:
     image: python:3.12-slim
     working_dir: /app
-    command: sh -c "pip install -e . && uvicorn services.chartedge_core.api:app --host 0.0.0.0 --port 8000"
+    command: sh -c "pip install -e . && uvicorn services.chartedge_core.api:app --host 0.0.0.0 --port 7000"
     ports:
-      - "8000:8000"
+      - "7070:7000"
     volumes:
       - .:/app
     environment:
@@ -15,10 +15,11 @@ services:
     working_dir: /app/frontend
     command: sh -c "npm install && npm run dev"
     ports:
-      - "3000:3000"
+      - "9000:3000"
     volumes:
       - .:/app
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=http://127.0.0.1:7070
     depends_on:
       - api
+

@@ -1,14 +1,25 @@
 import asyncio
 import os
+
+# Strict YAML configuration usage
+os.environ["SKIP_DB_OVERRIDES"] = "1"
+
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
 from services.chartedge_core.config import load_config
 from services.chartedge_core.indstocks import IndstocksMarketRuntime
 
 IST = ZoneInfo("Asia/Kolkata")
 
-# May 11 (Monday) and May 12 (Tuesday) 2026
-DATES = ["2026-05-11", "2026-05-12"]
+# May 2026 trading days
+DATES = [
+    "2026-05-01", "2026-05-04", "2026-05-05", "2026-05-06", "2026-05-07",
+    "2026-05-08", "2026-05-11", "2026-05-12", "2026-05-13", "2026-05-14",
+    "2026-05-15", "2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21",
+    "2026-05-22", "2026-05-25", "2026-05-26", "2026-05-27", "2026-05-28",
+    "2026-05-29"
+]
 
 async def run_date(date_str: str, enable_equity: bool = False):
     config_path = os.path.abspath("shared/config.yaml")
@@ -70,9 +81,9 @@ async def run_date(date_str: str, enable_equity: bool = False):
 
 async def main():
     print(f"\n{'='*70}")
-    print(f"🚀 INITIALIZING BACKTEST FOR MAY 11 & MAY 12, 2026")
+    print(f"🚀 INITIALIZING BACKTEST FOR MAY 2026")
     print(f"{'='*70}")
-    print(f"📅 Target Window: May 11, 2026 to May 12, 2026")
+    print(f"📅 Target Window: May 01, 2026 to May 31, 2026")
     print(f"🔧 Testing Instruments: NIFTY, BANKNIFTY, RELIANCE, HDFCBANK")
     print(f"{'='*70}\n")
 
@@ -84,7 +95,7 @@ async def main():
             daily_results.append(day_res)
 
     print(f"\n\n{'='*70}")
-    print(f"📊 MAY 11 & 12 BACKTEST COMPLETE")
+    print(f"📊 BACKTEST COMPLETE")
     print(f"{'='*70}\n")
 
     total_trades = 0

@@ -48,8 +48,10 @@ class IndstocksMarketRuntime(MarketSimulator):
         self.dm = DerivativeManager(token or "DUMMY_TOKEN")
         self._cached_deriv_tokens: dict = {}
         self._last_deriv_update = datetime.min
-        self._token_oi = {} # Track real-time OI
-        self._token_ltp = {} # Track real-time LTP
+        self._token_oi = {}   # Track real-time OI
+        self._token_ltp = {}  # Track real-time LTP
+        self._regime_by_symbol: dict[str, str] = {}    # symbol → latest market regime
+        self._iv_rank_by_symbol: dict[str, float] = {} # symbol → IV rank 0–100
 
     async def seed(self) -> None:
         print("\n" + "="*50)
@@ -153,7 +155,98 @@ class IndstocksMarketRuntime(MarketSimulator):
         )
         self.latest_indicators[symbol] = snapshot
 
-    async def run_backtest(self, start: datetime, end: datetime) -> dict[str, int | str]:
+    async def run_ai_regime_agent(self, symbol: str, target_date: datetime, current_open: float | None = None) -> float:
+        """Fetch the previous day's candles, run AIRegimeAgent, and apply all session parameters."""
+        token = os.getenv("INDMONEY_TOKEN") or os.getenv("INDSTOCKS_TOKEN")
+        if not token:
+            print("⚠️ INDSTOCKS_TOKEN missing. AIRegimeAgent bypassed.")
+            return 0.50
+
+        start_fetch = target_date - timedelta(days=5)
+
+        symbol_instrument = next((inst for inst in self.config.instruments if inst["symbol"] == symbol), None)
+        vix_instrument = next((inst for inst in self.config.instruments if inst["symbol"] == "INDIAVIX"), None)
+
+        if not symbol_instrument or not vix_instrument:
+            print(f"⚠️ {symbol} or INDIAVIX instrument not configured. AIRegimeAgent bypassed.")
+            return 0.50
+
+        try:
+            symbol_candles = await asyncio.to_thread(self._fetch_historical, token, symbol_instrument, start_fetch, target_date)
+            vix_candles = await asyncio.to_thread(self._fetch_historical, token, vix_instrument, start_fetch, target_date)
+
+            if not symbol_candles:
+                print(f"⚠️ No {symbol} historical candles found for regime analysis.")
+                return 0.50
+
+            target_date_utc = target_date.date()
+            prev_candles = [c for c in symbol_candles if c.time.date() < target_date_utc]
+            if not prev_candles:
+                print(f"⚠️ No {symbol} candles found strictly before target date.")
+                return 0.50
+
+            most_recent_date = max(c.time.date() for c in prev_candles)
+            prev_day_candles = [c for c in prev_candles if c.time.date() == most_recent_date]
+
+            vix_prev = [c for c in vix_candles if c.time.date() == most_recent_date and c.time.date() < target_date_utc]
+            vix_price = vix_prev[-1].close if vix_prev else 12.5
+
+            from services.chartedge_core.regime_agent import AIRegimeAgent
+            from services.chartedge_core.global_context import fetch_global_context
+            agent = AIRegimeAgent(self.signal_engine.provider)
+
+            print(f"🤖 AIRegimeAgent: Analyzing {most_recent_date} for {symbol}...")
+            global_ctx = await asyncio.to_thread(fetch_global_context, target_date.date())
+            if any(v is not None for v in global_ctx.values()):
+                print(f"  🌍 Global context: {global_ctx}")
+            decision = await agent.determine_threshold(symbol, target_date, prev_day_candles, vix_price, current_open, global_ctx)
+
+            regime = decision.get("market_regime", "UNKNOWN")
+            threshold = decision.get("confluence_threshold", 0.50)
+            vol_class = decision.get("volatility_class", "NORMAL")
+            weights = decision.get("indicator_weights")
+            sl_mult = float(decision.get("sl_atr_multiplier", 1.3))
+            options_bias = decision.get("options_bias", "NEUTRAL")
+            theta_mins = int(decision.get("theta_timeout_mins", 45))
+            avoid_open = bool(decision.get("avoid_first_30_mins", False))
+
+            print(f"\n{'='*70}")
+            print(f"🤖 REGIME DECISION: {symbol} → {target_date.date()}")
+            print(f"{'='*70}")
+            print(f"  Regime:        {regime}  |  Volatility: {vol_class}  |  VIX: {vix_price:.2f}")
+            print(f"  Threshold:     {threshold:.2f}  |  SL mult: {sl_mult:.2f}x ATR")
+            print(f"  Options bias:  {options_bias}  |  Theta timeout: {theta_mins}m  |  Skip open: {avoid_open}")
+            if weights:
+                print(f"  Weights:       {weights}")
+            for o in decision.get("key_observations", []):
+                print(f"  > {o}")
+            print(f"  Reasoning:     {decision.get('reasoning', '')}")
+            print(f"{'='*70}\n")
+
+            # Apply: confluence threshold
+            self._regime_by_symbol[symbol] = regime
+            self.signal_engine.thresholds[symbol] = threshold
+
+            # Apply: indicator weights
+            if weights:
+                self.config.indicator_weights[symbol] = weights
+
+            # Apply: risk params (shared across instruments — last writer wins for DEFAULT)
+            self.trader.risk_config["sl_atr_multiplier"] = sl_mult
+            self.trader.risk_config["theta_timeout_mins"] = theta_mins
+            self.trader.risk_config["avoid_first_30_mins"] = avoid_open
+            self.trader.risk_config[f"options_bias_{symbol}"] = options_bias
+            self.trader.risk_config[f"market_regime_{symbol}"] = regime
+
+            return threshold
+
+        except Exception as e:
+            print(f"⚠️ AIRegimeAgent setup failed for {symbol}: {e}. Defaulting to 0.50.")
+            import traceback
+            traceback.print_exc()
+            return 0.50
+
+    async def run_backtest(self, start: datetime, end: datetime, run_regime_agent: bool = False) -> dict[str, int | str]:
         token = os.getenv("INDMONEY_TOKEN") or os.getenv("INDSTOCKS_TOKEN")
         if not token:
             self.feed_health = "INDSTOCKS_TOKEN_MISSING"
@@ -185,6 +278,20 @@ class IndstocksMarketRuntime(MarketSimulator):
                         **fetched_counts,
                     }
 
+            if run_regime_agent:
+                # 1. Run for NIFTY
+                nifty_c = sorted([c for c in all_candles if c.instrument == "NIFTY"], key=lambda x: x.time)
+                nifty_open = nifty_c[0].open if nifty_c else None
+                nifty_thresh = await self.run_ai_regime_agent("NIFTY", start, nifty_open)
+                
+                # 2. Run for BANKNIFTY
+                bn_c = sorted([c for c in all_candles if c.instrument == "BANKNIFTY"], key=lambda x: x.time)
+                bn_open = bn_c[0].open if bn_c else None
+                bn_thresh = await self.run_ai_regime_agent("BANKNIFTY", start, bn_open)
+                
+                # Set fallback default
+                self.signal_engine.thresholds["DEFAULT"] = min(nifty_thresh, bn_thresh)
+
             for candle in sorted(all_candles, key=lambda item: item.time):
                 await self.process_closed_candle(candle)
                 self._append_equity(candle.time)
@@ -207,6 +314,14 @@ class IndstocksMarketRuntime(MarketSimulator):
     def _fetch_historical(
         self, token: str, instrument: dict, start: datetime, end: datetime
     ) -> list[Candle]:
+        # Real-data backtests: when ZERODHA_CACHE_DIR is set, serve candles from a local
+        # cache of REAL Zerodha history instead of the (synthetic-prone) INDstocks feed.
+        # Cache file: <dir>/<SYMBOL>.json = {"candles": [[ts_ms,o,h,l,c,v], ...]}.
+        # Symbols without a cache file return [] (e.g. monitor-only instruments) — the
+        # engine treats absent monitor data as neutral context.
+        cache_dir = os.getenv("ZERODHA_CACHE_DIR")
+        if cache_dir:
+            return self._load_zerodha_cache(cache_dir, instrument["symbol"], start, end)
         for attempt in range(3):
             try:
                 response = httpx.get(
@@ -230,6 +345,38 @@ class IndstocksMarketRuntime(MarketSimulator):
         payload = response.json()
         raw_candles = self._extract_historical_candles(payload, instrument["historical_scrip_code"])
         return [self._historical_row_to_candle(row, instrument["symbol"]) for row in raw_candles]
+
+    def _load_zerodha_cache(self, cache_dir: str, symbol: str, start: datetime, end: datetime) -> list[Candle]:
+        """Load REAL cached Zerodha candles for `symbol`, sliced to [start, end]."""
+        import glob as _glob
+        # Merge all chunk files for this symbol: <SYMBOL>.json + <SYMBOL>_*.json
+        paths = sorted(set(_glob.glob(os.path.join(cache_dir, f"{symbol}.json"))
+                           + _glob.glob(os.path.join(cache_dir, f"{symbol}_*.json"))))
+        if not paths:
+            return []
+        rows = []
+        for p in paths:
+            with open(p) as f:
+                raw = json.load(f)
+            rows.extend(raw.get("candles", raw) if isinstance(raw, dict) else raw)
+        out: list[Candle] = []
+        seen: set = set()
+        for r in rows:
+            if isinstance(r, dict):
+                t = datetime.fromisoformat(r["date"])
+                o, h, l, c, v = r["open"], r["high"], r["low"], r["close"], r.get("volume", 0)
+            else:
+                t = datetime.fromtimestamp(r[0] / 1000, IST)
+                o, h, l, c, v = r[1], r[2], r[3], r[4], r[5]
+            if t < start or t > end or t in seen:
+                continue
+            seen.add(t)
+            out.append(Candle(
+                time=t, instrument=symbol, timeframe="15m",
+                open=float(o), high=float(h), low=float(l), close=float(c), volume=int(v),
+            ))
+        out.sort(key=lambda c: c.time)
+        return out
 
     def _extract_historical_candles(self, payload: dict, scrip_code: str) -> list:
         data = payload.get("data", {})
@@ -281,6 +428,20 @@ class IndstocksMarketRuntime(MarketSimulator):
                 print("DEBUG: Starting IndstocksMarketRuntime.run()")
                 if not _seeded:
                     await self.seed()
+                    # Run AI Regime Agent to dynamically set today's baseline confluence threshold at startup
+                    try:
+                        print("🤖 Starting dynamic AI Regime Agent analysis for NIFTY & BANKNIFTY trading baselines...")
+                        nifty_candles = self.candles.get("NIFTY", [])
+                        nifty_open = nifty_candles[-1].open if nifty_candles else None
+                        nifty_thresh = await self.run_ai_regime_agent("NIFTY", datetime.now(IST), nifty_open)
+                        
+                        bn_candles = self.candles.get("BANKNIFTY", [])
+                        bn_open = bn_candles[-1].open if bn_candles else None
+                        bn_thresh = await self.run_ai_regime_agent("BANKNIFTY", datetime.now(IST), bn_open)
+                        
+                        self.signal_engine.thresholds["DEFAULT"] = min(nifty_thresh, bn_thresh)
+                    except Exception as ra_err:
+                        print(f"⚠️ Failed to run AI Regime Agent at startup: {ra_err}. Continuing with default thresholds.")
                     _seeded = True
                 
                 # Reload .env to pick up any manual token updates without restarting the server
@@ -403,7 +564,15 @@ class IndstocksMarketRuntime(MarketSimulator):
             if item.get("role") == "trading" and self.candles.get(symbol) and self.dm:
                 try:
                     spot = self.candles[symbol][-1].close
-                    chain = self.dm.get_option_chain(spot, symbol, range_strikes=10)
+                    current_dt = self.candles[symbol][-1].time
+                    expiry_buffer = self.config.risk.get("options_expiry_buffer_days", 1)
+                    chain = self.dm.get_option_chain(
+                        spot, 
+                        symbol, 
+                        range_strikes=10, 
+                        current_dt=current_dt, 
+                        expiry_buffer_days=expiry_buffer
+                    )
                     for row in chain:
                         if row["ce_token"]: tokens.append(row["ce_token"])
                         if row["pe_token"]: tokens.append(row["pe_token"])
@@ -495,7 +664,16 @@ class IndstocksMarketRuntime(MarketSimulator):
             try:
                 if self.candles.get("NIFTY") and len(self.candles["NIFTY"]) > 0:
                     spot = self.candles["NIFTY"][-1].close
-                    opts = self.dm.get_atm_options(spot, "NIFTY")
+                    current_dt = self.candles["NIFTY"][-1].time
+                    expiry_buffer = self.config.risk.get("options_expiry_buffer_days", 1)
+                    strike_offset = self.config.risk.get("options_strike_offset", 0)
+                    opts = self.dm.get_atm_options(
+                        spot, 
+                        "NIFTY", 
+                        current_dt=current_dt, 
+                        expiry_buffer_days=expiry_buffer, 
+                        strike_offset=strike_offset
+                    )
                     # Extract only tokens for caching (as used by global cooldown logic)
                     self._cached_deriv_tokens = {
                         "future": self.dm.get_current_future("NIFTY"),
@@ -529,7 +707,15 @@ class IndstocksMarketRuntime(MarketSimulator):
 
         if self.dm and spot > 0:
             try:
-                raw_chain = self.dm.get_option_chain(spot, symbol, range_strikes=10)
+                current_dt = self.candles[symbol][-1].time if symbol in self.candles else None
+                expiry_buffer = self.config.risk.get("options_expiry_buffer_days", 1)
+                raw_chain = self.dm.get_option_chain(
+                    spot, 
+                    symbol, 
+                    range_strikes=10, 
+                    current_dt=current_dt, 
+                    expiry_buffer_days=expiry_buffer
+                )
                 for row in raw_chain:
                     ce_token_id = row["ce_token"].split(":", 1)[1] if row["ce_token"] else ""
                     pe_token_id = row["pe_token"].split(":", 1)[1] if row["pe_token"] else ""
@@ -567,10 +753,117 @@ class IndstocksMarketRuntime(MarketSimulator):
             chain=chain_rows[:11]
         )
 
-    def get_option_contract(self, symbol: str, direction: str) -> Optional[dict]:
-        """Resolves an index signal to an ATM option contract.
+    def _structure_allows_entry(self, symbol: str, direction: str) -> bool:
+        """Gate entries using regime classification from AIRegimeAgent."""
+        from services.chartedge_core.structures import select_structure
+        regime = self._regime_by_symbol.get(symbol, "")
+        if not regime:
+            return True  # no regime info yet — allow
+        iv_rank = self._iv_rank_by_symbol.get(symbol, 50.0)
+        strike_offset_config = self.config.risk.get("options_strike_offset", 0)
         
-        Note: Per user request, options are strictly limited to NIFTY.
+        optimal_strategy = "NAKED_BUY"
+        if self.latest_indicators and symbol in self.latest_indicators:
+            regime_info = self.latest_indicators[symbol].regime_info
+            if regime_info:
+                optimal_strategy = regime_info.get("optimal_strategy", "NAKED_BUY")
+
+        result = select_structure(regime, direction, iv_rank, 0.0, optimal_strategy, strike_offset_config)
+        if not result.trade:
+            print(f"🚫 [Structure] {symbol} {direction}: {result.reason}")
+        return result.trade
+
+    def _get_structure_strike_offset(self, symbol: str) -> int:
+        """Return ITM strike offset from regime-aware structure selection."""
+        from services.chartedge_core.structures import select_structure
+        regime = self._regime_by_symbol.get(symbol, "")
+        iv_rank = self._iv_rank_by_symbol.get(symbol, 50.0)
+        if not regime:
+            return int(self.config.risk.get("options_strike_offset", 0))
+        result = select_structure(regime, "CE", iv_rank, 0.0,
+                                  optimal_strategy="NAKED_BUY",
+                                  strike_offset_config=self.config.risk.get("options_strike_offset", 0))
+        # Result is an OptionStructure. legs[0].strike_offset
+        if result.trade and result.legs:
+            return result.legs[0].strike_offset
+        return int(self.config.risk.get("options_strike_offset", 0))
+
+    def get_multi_leg_structure(self, symbol: str, direction: str) -> Optional[dict]:
+        """Resolves an index signal to a Multi-Leg OptionStructure."""
+        if not self.dm or symbol not in ["NIFTY", "BANKNIFTY"]:
+            return None
+            
+        spot = self.candles[symbol][-1].close if self.candles.get(symbol) else 0
+        if spot <= 0: return None
+        
+        regime = self._regime_by_symbol.get(symbol, "")
+        iv_rank = self._iv_rank_by_symbol.get(symbol, 50.0)
+        
+        # Read the optimal strategy directly from the latest snapshot if available
+        optimal_strategy = "NAKED_BUY"
+        latest_indicators = getattr(self, "latest_indicators", {})
+        if latest_indicators and symbol in latest_indicators:
+            regime_info = latest_indicators[symbol].regime_info
+            if regime_info:
+                optimal_strategy = regime_info.get("optimal_strategy", "NAKED_BUY")
+
+        from services.chartedge_core.structures import select_structure
+        opt_dir = "CE" if direction == "BUY" else "PE"
+        
+        # Resolve the structure rules (Leg definitions)
+        struct = select_structure(
+            regime=regime,
+            direction=opt_dir,
+            iv_rank=iv_rank,
+            spot=spot,
+            optimal_strategy=optimal_strategy,
+            strike_offset_config=int(self.config.risk.get("options_strike_offset", 0))
+        )
+        
+        if not struct.trade:
+            print(f"🚫 [Structure] {symbol} {direction}: {struct.reason}")
+            return None
+            
+        try:
+            current_dt = self.candles[symbol][-1].time if self.candles.get(symbol) else None
+            expiry_buffer = self.config.risk.get("options_expiry_buffer_days", 1)
+            
+            resolved_legs = []
+            for leg in struct.legs:
+                options = self.dm.get_atm_options(
+                    spot, 
+                    symbol, 
+                    current_dt=current_dt, 
+                    expiry_buffer_days=expiry_buffer, 
+                    strike_offset=leg.strike_offset
+                )
+                contract_data = options.get(leg.option_type)
+                if not contract_data:
+                    return None  # If any leg fails to resolve, abort the structure
+                
+                token_id = contract_data["token"].split(":", 1)[1]
+                resolved_legs.append({
+                    "symbol": contract_data["symbol"],
+                    "token": contract_data["token"],
+                    "strike": contract_data.get("strike", 0.0),
+                    "ltp": self._token_ltp.get(token_id, 0),
+                    "action": leg.action,
+                    "ratio": leg.ratio,
+                    "option_type": leg.option_type
+                })
+                
+            return {
+                "strategy_name": struct.strategy_name,
+                "reason": struct.reason,
+                "legs": resolved_legs
+            }
+        except Exception as e:
+            print(f"ERROR_RESOLVING_MULTI_LEG: {e}")
+            return None
+
+    def get_option_contract(self, symbol: str, direction: str) -> Optional[dict]:
+        """Resolves an index signal to an option contract.
+        Strike offset comes from the regime-aware structure selector.
         """
         if not self.dm:
             return None
@@ -583,7 +876,16 @@ class IndstocksMarketRuntime(MarketSimulator):
         if spot <= 0: return None
         
         try:
-            options = self.dm.get_atm_options(spot, symbol)
+            current_dt = self.candles[symbol][-1].time if self.candles.get(symbol) else None
+            expiry_buffer = self.config.risk.get("options_expiry_buffer_days", 1)
+            strike_offset = self._get_structure_strike_offset(symbol)
+            options = self.dm.get_atm_options(
+                spot, 
+                symbol, 
+                current_dt=current_dt, 
+                expiry_buffer_days=expiry_buffer, 
+                strike_offset=strike_offset
+            )
             # Support both Direction.value (BUY/SELL) and explicit type (CE/PE)
             if direction in ["CE", "PE"]:
                 opt_type = direction

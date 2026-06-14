@@ -26,10 +26,15 @@ class Config(BaseModel):
     iv_rank: dict[str, Any] = {}
     costs: dict[str, Any] = {}
     options_structure: dict[str, Any] = {}
+    futures_risk: dict[str, Any] = {}
 
     @property
     def costs_config(self) -> dict[str, Any]:
         return self.costs
+
+    @property
+    def futures_risk_config(self) -> dict[str, Any]:
+        return self.futures_risk
 
     @property
     def enabled_symbols(self) -> list[str]:
@@ -37,7 +42,11 @@ class Config(BaseModel):
 
     @property
     def trading_symbols(self) -> list[str]:
-        return [item["symbol"] for item in self.instruments if item.get("enabled", True) and item.get("role", "trading") == "trading"]
+        """Symbols actively traded via the options pipeline (role=trading only)."""
+        return [
+            item["symbol"] for item in self.instruments
+            if item.get("enabled", True) and item.get("role", "trading") == "trading"
+        ]
 
     @property
     def monitor_symbols(self) -> list[str]:

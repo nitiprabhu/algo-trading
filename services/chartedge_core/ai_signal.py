@@ -11,7 +11,7 @@ import httpx
 
 from services.chartedge_core.confluence import consideration
 from services.chartedge_core.models import Candle, Direction, EntryZone, IndicatorSnapshot, Signal
-from services.chartedge_core.strategies import EagleNiftyT315, FiveEMAScalping
+from services.chartedge_core.strategies import EagleNiftyT315, FiveEMAScalping, NiftyFuturesORB
 
 
 class AIProvider(ABC):
@@ -251,7 +251,8 @@ class SignalEngine:
         if symbol not in self.strategies:
             self.strategies[symbol] = {
                 "t315": EagleNiftyT315(),
-                "ema5": FiveEMAScalping()
+                "ema5": FiveEMAScalping(),
+                "fut_orb": NiftyFuturesORB(),
             }
         
         strategies = self.strategies[symbol]
@@ -262,19 +263,40 @@ class SignalEngine:
         # 2. Update strategy states
         strategies["t315"].update(candle)
         strategies["ema5"].update(candle, candles)
+        strategies["fut_orb"].update(candle)
 
         # 3. Check for triggers (T315 uses updated state)
         t315_trigger = strategies["t315"].get_signal(candle, india_vix)
-        trigger = t315_trigger or ema5_trigger
+
+        # Futures ORB signal (NIFTY only — uses spot price as proxy)
+        vwap_val = 0.0
+        adx_val  = 0.0
+        if latest_snapshot:
+            vwap_ind = latest_snapshot.indicators.get("vwap")
+            if vwap_ind and isinstance(vwap_ind.value, (int, float)):
+                vwap_val = float(vwap_ind.value)
+            adx_ind = latest_snapshot.indicators.get("adx")
+            if adx_ind and isinstance(adx_ind.value, (int, float)):
+                adx_val = float(adx_ind.value)
+        fut_orb_trigger = None
+        if symbol == "NIFTY":
+            fut_orb_trigger = strategies["fut_orb"].get_signal(
+                candle, india_vix, vwap=vwap_val, adx=adx_val
+            )
+            if fut_orb_trigger:
+                # Override instrument to NIFTY_FUT so it routes to FuturesTradingEngine
+                fut_orb_trigger["instrument_override"] = "NIFTY_FUT"
+
+        trigger = t315_trigger or ema5_trigger or fut_orb_trigger
         
         if not trigger:
             # Periodic health check print (every 5 mins per instrument)
             if candle.time.minute % 5 == 0:
-                print(f"💤 [Strategy] {symbol} @ {candle.time.strftime('%H:%M')} - No Trigger (T315: {'YES' if t315_trigger else 'NO'}, 5EMA: {'YES' if ema5_trigger else 'NO'})")
+                print(f"💤 [Strategy] {symbol} @ {candle.time.strftime('%H:%M')} - No Trigger (T315: {'YES' if t315_trigger else 'NO'}, 5EMA: {'YES' if ema5_trigger else 'NO'}, FUT_ORB: {'YES' if fut_orb_trigger else 'NO'})")
             return None
 
         # Cooldown check to avoid spamming AI reviews on consecutive candles of the same setup
-        cooldown_key = f"{symbol}_{trigger['strategy']}_{trigger['option_type']}"
+        cooldown_key = f"{symbol}_{trigger['strategy']}_{trigger.get('option_type', 'DIR')}"
         if cooldown_key in self.last_rejection_time:
             cooldown_expiry = self.last_rejection_time[cooldown_key] + timedelta(minutes=15)
             if candle.time < cooldown_expiry:
@@ -282,13 +304,10 @@ class SignalEngine:
                     print(f"⏳ [Cooldown] Suppressing AI Review for {cooldown_key} at {candle.time.strftime('%H:%M')} (expires at {cooldown_expiry.strftime('%H:%M')})")
                 return None
 
-        # Confluence alignment gate: reject if indicator confluence clearly opposes direction.
-        # T315/5EMA fires from price action, but if the broader indicator stack is opposite, skip.
-        if latest_snapshot and latest_snapshot.confluence_score != 0:
+        # Confluence alignment gate: only applies to options signals (CE/PE)
+        if trigger.get("option_type") and latest_snapshot and latest_snapshot.confluence_score != 0:
             score = latest_snapshot.confluence_score
             opt_type = trigger["option_type"]
-            # CE = bullish bet, needs non-negative confluence. PE = bearish bet, needs non-positive.
-            # Only reject on strong opposition (>0.25 in wrong direction) to avoid over-filtering.
             if opt_type == "CE" and score < -0.25:
                 print(f"⛔ [Confluence Gate] {symbol} T315 CE blocked: confluence {score:.3f} strongly bearish")
                 return None
@@ -309,29 +328,31 @@ class SignalEngine:
 
     def _from_strategy_dict(self, trigger: dict, candle: Candle) -> Signal:
         """Convert a strategy trigger dictionary to a Signal object."""
-        # Use simple entry zone around close
-        entry_low = candle.close * 0.9995
+        entry_low  = candle.close * 0.9995
         entry_high = candle.close * 1.0005
-        
-        # Determine targets and SL based on PRD requirements
-        # PRD: Volatility-Adjusted SL = 1.5 * 5-min ATR
-        # (We fallback to trigger['sl'] if ATR isn't passed here, but usually it is)
-        sl = trigger["sl"]
-        
+        sl  = trigger["sl"]
         risk = abs(candle.close - sl)
-        if trigger["option_type"] == "CE":
-            t1 = candle.close + (risk * 1.5)
-            t2 = candle.close + (risk * 3.0)
-            direction = Direction.BUY
-        else:
-            t1 = candle.close - (risk * 1.5)
-            t2 = candle.close - (risk * 3.0)
-            direction = Direction.BUY # We still BUY the option (PE)
 
-        # Creating a dummy snapshot for the strategy signal
+        opt_type = trigger.get("option_type")
+        raw_dir  = trigger.get("direction", "BUY")
+
+        if opt_type == "CE":
+            t1, t2 = candle.close + risk * 1.5, candle.close + risk * 3.0
+            direction = Direction.BUY
+        elif opt_type == "PE":
+            t1, t2 = candle.close - risk * 1.5, candle.close - risk * 3.0
+            direction = Direction.BUY   # still BUY the PE option
+        else:
+            # Futures / directional signals: use explicit direction
+            direction = Direction.BUY if raw_dir == "BUY" else Direction.SELL
+            if direction == Direction.BUY:
+                t1, t2 = candle.close + risk * 1.5, candle.close + risk * 3.0
+            else:
+                t1, t2 = candle.close - risk * 1.5, candle.close - risk * 3.0
+
         from services.chartedge_core.models import IndicatorSnapshot
         snapshot = IndicatorSnapshot(
-            instrument=candle.instrument,
+            instrument=trigger.get("instrument_override", candle.instrument),
             timeframe="1m",
             candle_time=candle.time,
             price=candle.close,
@@ -339,11 +360,12 @@ class SignalEngine:
             confluence_score=1.0 if direction == Direction.BUY else -1.0
         )
 
+        instrument = trigger.get("instrument_override", candle.instrument)
         return Signal(
             created_at=datetime.now().astimezone(),
-            instrument=candle.instrument,
-            signal=Direction.BUY, # All F&O strategies here are buying options
-            confidence=85, # Strategy-based signals are high confidence
+            instrument=instrument,
+            signal=direction,
+            confidence=85,
             entry_zone=EntryZone(low=round(entry_low, 2), high=round(entry_high, 2)),
             stop_loss=round(sl, 2),
             target_1=round(t1, 2),
@@ -356,7 +378,7 @@ class SignalEngine:
             ai_model="QUANT_ENGINE",
             ai_status="STRATEGY_OK",
             strategy_name=trigger["strategy"],
-            option_type=trigger["option_type"]
+            option_type=opt_type,
         )
 
     def _from_ai_json(self, snapshot: IndicatorSnapshot, raw: str, provider_name: str) -> Signal:

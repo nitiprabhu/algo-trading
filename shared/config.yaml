@@ -15,6 +15,14 @@ instruments:
     enabled: true
     role: trading
     timeframes: [1m, 5m, 15m, 1hr, 1D]
+  - symbol: NIFTY_FUT
+    display_name: Nifty 50 Futures
+    exchange: NFO
+    historical_scrip_code: __DYNAMIC__
+    websocket_token: __DYNAMIC__
+    enabled: true
+    role: futures_trading
+    timeframes: [1m, 5m, 15m]
   - symbol: RELIANCE
     display_name: Reliance Industries
     exchange: NSE
@@ -47,6 +55,7 @@ data:
     websocket_url: wss://ws-prices.indstocks.com/api/v1/ws/prices
     historical_interval: 1minute
     historical_lookback_days: 4
+    historical_chunk_days: 5   # INDstocks caps ~4 trading days per request; chunk for longer backtests
     websocket_mode: quote
 
 market_hours:
@@ -58,6 +67,7 @@ market_hours:
 
 confluence_thresholds:
   NIFTY: 0.50
+  NIFTY_FUT: 0.50
   BANKNIFTY: 0.50
   RELIANCE: 0.50
   HDFCBANK: 0.50
@@ -65,6 +75,13 @@ confluence_thresholds:
 
 indicator_weights:
   NIFTY:
+    rsi: 0.18
+    macd: 0.18
+    ema_ribbon: 0.14
+    vwap: 0.20
+    supertrend: 0.20
+    volume: 0.10
+  NIFTY_FUT:
     rsi: 0.18
     macd: 0.18
     ema_ribbon: 0.14
@@ -115,6 +132,16 @@ risk:
   options_expiry_buffer_days: 1
   options_strike_offset: 1  # 1 = ITM (delta ~0.65); 0 = ATM; -1 = OTM
   options_min_premium: 80.0 # Filter out cheap options where spreads dominate edge
+
+futures_risk:
+  NIFTY_FUT:
+    lot_size: 75
+    max_lots: 1
+    sl_points: 50
+    target_1_points: 75
+    target_2_points: 150
+    eod_exit: "15:10"
+    session_entry_cutoff: "14:30"
 
 # NSE weekly expiry day per instrument (Python weekday: 0=Mon, 1=Tue, ..., 3=Thu)
 # NIFTY moved to Tuesday 2024-09; BANKNIFTY scrapped weeklies.

@@ -323,3 +323,198 @@ class FiveEMAScalping(OptionStrategy):
                 return res
             
         return None
+
+
+class NiftyFuturesORB(OptionStrategy):
+    """
+    Nifty Futures Opening Range Breakout (ORB)
+    ──────────────────────────────────────────
+    Session 1 — ORB (09:15–09:45):
+        Build the 30-min opening range. Breakout above range_high → BUY futures.
+        Breakdown below range_low → SELL futures.
+
+    Session 2 — Midday Trend (11:00–11:30):
+        If no trade from session 1, check directional momentum using 15-min EMAs.
+        EMA9 > EMA21 and price above VWAP → BUY. Vice versa → SELL.
+
+    Session 3 — Close Setup (14:00–14:30):
+        Final entry window. Only trade with ADX > 28 (strong trend) and VWAP-aligned.
+
+    Common rules:
+        - 1 trade per day (first signal wins)
+        - Breakout candle body must be > 35% of range (no wick-only breaks)
+        - Volume must be > 1.2× trailing 10-candle average
+        - VIX filter: 10–28
+    """
+    SUPPORTED_INSTRUMENTS = ("NIFTY", "NIFTY_FUT")
+    RANGE_END   = time(9, 45)
+    ORB_CUTOFF  = time(10, 15)
+    MID_START   = time(11, 0)
+    MID_END     = time(11, 30)
+    CLOSE_START = time(14, 0)
+    CLOSE_END   = time(14, 30)
+    BODY_MIN    = 0.35
+    VOL_MULT    = 1.2
+    VIX_MIN     = 10.0
+    VIX_MAX     = 28.0
+
+    def __init__(self):
+        self._state: dict[str, dict] = {}
+
+    def _get_state(self, symbol: str) -> dict:
+        if symbol not in self._state:
+            self._state[symbol] = {
+                "range_high": None,
+                "range_low": None,
+                "is_range_set": False,
+                "breakout_dir": None,
+                "recent_volumes": [],
+                "current_day": None,
+                "traded_today": False,
+                "ema9": 0.0,
+                "ema21": 0.0,
+                "closes_15m": [],
+            }
+        return self._state[symbol]
+
+    def update(self, candle: Candle):
+        # Accept NIFTY candles — futures price tracks spot closely
+        if candle.instrument not in ("NIFTY", "NIFTY_FUT"):
+            return
+
+        s = self._get_state("NIFTY_FUT")
+        current_date = candle.time.date()
+        if s["current_day"] != current_date:
+            s["current_day"]    = current_date
+            s["range_high"]     = None
+            s["range_low"]      = None
+            s["is_range_set"]   = False
+            s["breakout_dir"]   = None
+            s["recent_volumes"] = []
+            s["traded_today"]   = False
+            s["closes_15m"]     = []
+
+        t = candle.time.time()
+
+        if t < self.RANGE_END:
+            s["recent_volumes"].append(candle.volume)
+            if len(s["recent_volumes"]) > 10:
+                s["recent_volumes"].pop(0)
+
+        if time(9, 15) <= t <= self.RANGE_END:
+            if s["range_high"] is None or candle.high > s["range_high"]:
+                s["range_high"] = candle.high
+            if s["range_low"] is None or candle.low < s["range_low"]:
+                s["range_low"] = candle.low
+
+        if t > self.RANGE_END and not s["is_range_set"] and s["range_high"] is not None:
+            s["is_range_set"] = True
+            rng = s["range_high"] - s["range_low"]
+            print(f"🎯 [FUT-ORB] Range set: {s['range_low']:.2f}–{s['range_high']:.2f} ({rng:.2f} pts)")
+
+        if candle.time.minute % 15 == 0:
+            s["closes_15m"].append(candle.close)
+            if len(s["closes_15m"]) > 30:
+                s["closes_15m"].pop(0)
+            if len(s["closes_15m"]) >= 21:
+                s["ema9"]  = ema(s["closes_15m"], 9)
+                s["ema21"] = ema(s["closes_15m"], 21)
+
+    def get_signal(
+        self,
+        candle: Candle,
+        india_vix: float = 0.0,
+        vwap: float = 0.0,
+        adx: float = 0.0,
+        vix_band: Optional[tuple[float, float]] = None,
+    ) -> Optional[Dict]:
+        s = self._get_state("NIFTY_FUT")
+
+        if s["traded_today"]:
+            return None
+
+        vix_lo, vix_hi = vix_band if vix_band else (self.VIX_MIN, self.VIX_MAX)
+        if india_vix > 0 and not (vix_lo <= india_vix <= vix_hi):
+            return None
+
+        t = candle.time.time()
+
+        # ── Session 1: ORB ─────────────────────────────────────────────────────
+        if s["is_range_set"] and self.RANGE_END < t <= self.ORB_CUTOFF:
+            sig = self._check_orb(candle, s, india_vix)
+            if sig:
+                s["traded_today"] = True
+                return sig
+
+        # ── Session 2: Midday Trend ─────────────────────────────────────────────
+        if self.MID_START <= t <= self.MID_END and s["ema9"] and s["ema21"]:
+            sig = self._check_trend(candle, s, "MIDDAY", india_vix, vwap)
+            if sig:
+                s["traded_today"] = True
+                return sig
+
+        # ── Session 3: Close Setup ─────────────────────────────────────────────
+        if self.CLOSE_START <= t <= self.CLOSE_END and adx >= 28:
+            sig = self._check_trend(candle, s, "CLOSE", india_vix, vwap)
+            if sig:
+                s["traded_today"] = True
+                return sig
+
+        return None
+
+    def _check_orb(self, candle: Candle, s: dict, vix: float) -> Optional[Dict]:
+        if not s["is_range_set"] or s["breakout_dir"] is not None:
+            return None
+        candle_rng = (candle.high - candle.low) or 0.01
+        body_ratio = abs(candle.close - candle.open) / candle_rng
+        avg_vol = sum(s["recent_volumes"]) / len(s["recent_volumes"]) if s["recent_volumes"] else 0
+
+        if candle.close > s["range_high"]:
+            if body_ratio < self.BODY_MIN or (avg_vol > 0 and candle.volume < avg_vol * self.VOL_MULT):
+                return None
+            s["breakout_dir"] = "BUY"
+            print(f"🔥 [FUT-ORB] BUY above {s['range_high']:.2f} at {candle.time}")
+            return {
+                "strategy": "FUT_ORB",
+                "direction": "BUY",
+                "option_type": None,
+                "reason": f"Nifty Futures ORB BUY breakout above {s['range_high']:.2f} (VIX={vix:.1f})",
+                "sl": s["range_low"],
+            }
+
+        if candle.close < s["range_low"]:
+            if body_ratio < self.BODY_MIN or (avg_vol > 0 and candle.volume < avg_vol * self.VOL_MULT):
+                return None
+            s["breakout_dir"] = "SELL"
+            print(f"🔥 [FUT-ORB] SELL below {s['range_low']:.2f} at {candle.time}")
+            return {
+                "strategy": "FUT_ORB",
+                "direction": "SELL",
+                "option_type": None,
+                "reason": f"Nifty Futures ORB SELL breakdown below {s['range_low']:.2f} (VIX={vix:.1f})",
+                "sl": s["range_high"],
+            }
+        return None
+
+    def _check_trend(self, candle: Candle, s: dict, session: str, vix: float, vwap: float) -> Optional[Dict]:
+        if not s["ema9"] or not s["ema21"]:
+            return None
+        if s["ema9"] > s["ema21"] and candle.close > vwap:
+            print(f"🔥 [FUT-{session}] BUY — EMA9 > EMA21, above VWAP")
+            return {
+                "strategy": f"FUT_{session}",
+                "direction": "BUY",
+                "option_type": None,
+                "reason": f"Nifty Futures {session} BUY — EMA9 > EMA21, above VWAP (VIX={vix:.1f})",
+                "sl": min(s["ema21"], vwap) if vwap else s["ema21"],
+            }
+        if s["ema9"] < s["ema21"] and candle.close < vwap:
+            print(f"🔥 [FUT-{session}] SELL — EMA9 < EMA21, below VWAP")
+            return {
+                "strategy": f"FUT_{session}",
+                "direction": "SELL",
+                "option_type": None,
+                "reason": f"Nifty Futures {session} SELL — EMA9 < EMA21, below VWAP (VIX={vix:.1f})",
+                "sl": max(s["ema21"], vwap) if vwap else s["ema21"],
+            }
+        return None

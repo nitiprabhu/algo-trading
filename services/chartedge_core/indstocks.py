@@ -87,6 +87,12 @@ class IndstocksMarketRuntime(MarketSimulator):
                 symbol = instrument["symbol"]
                 websocket_token = instrument["websocket_token"]
                 
+                # Skip instruments with dynamic scrip codes (e.g. NIFTY_FUT)
+                # — their signals derive from the underlying spot candles (NIFTY)
+                if instrument.get("historical_scrip_code", "") == "__DYNAMIC__":
+                    print(f"⏭️ Skipping historical fetch for {symbol} (dynamic instrument — uses spot proxy)")
+                    continue
+                
                 print(f"📡 Fetching historical data for {symbol}...")
                 try:
                     # Run sync httpx.get off the event loop so HTTP handler tasks aren't starved
@@ -255,6 +261,7 @@ class IndstocksMarketRuntime(MarketSimulator):
         self.reset_runtime_state()
         self.is_backtesting = True
         self.trader.is_backtesting = True
+        self.futures_trader.is_backtesting = True
         fetched_counts: dict[str, int] = {}
         all_candles: list[Candle] = []
         try:
@@ -262,6 +269,11 @@ class IndstocksMarketRuntime(MarketSimulator):
                 if not instrument.get("enabled", True):
                     continue
                 try:
+                    # Skip instruments with dynamic scrip codes (e.g. NIFTY_FUT)
+                    if instrument.get("historical_scrip_code", "") == "__DYNAMIC__":
+                        print(f"⏭️ Skipping historical fetch for {instrument['symbol']} (dynamic — uses spot proxy)")
+                        fetched_counts[instrument["symbol"]] = 0
+                        continue
                     print(f"DEBUG: Fetching historical for {instrument['symbol']}...")
                     candles = await asyncio.to_thread(self._fetch_historical, token, instrument, start, end)
                     print(f"DEBUG: Fetched {len(candles)} candles for {instrument['symbol']}")
@@ -296,13 +308,17 @@ class IndstocksMarketRuntime(MarketSimulator):
                 await self.process_closed_candle(candle)
                 self._append_equity(candle.time)
 
+            last_prices = {
+                symbol: candles[-1].close
+                for symbol, candles in self.candles.items()
+                if candles
+            }
             if self.trader.open_positions:
-                last_prices = {
-                    symbol: candles[-1].close
-                    for symbol, candles in self.candles.items()
-                    if candles
-                }
                 await self.trader.force_close_all(last_prices, end, "BACKTEST_EOD")
+            if self.futures_trader.open_positions:
+                fut_prices = {"NIFTY_FUT": last_prices.get("NIFTY", 0)}
+                await self.futures_trader.force_close_all(fut_prices, end, "BACKTEST_EOD")
+            if last_prices:
                 self._append_equity(end)
 
             self.feed_health = "BACKTEST_COMPLETE"
@@ -310,6 +326,7 @@ class IndstocksMarketRuntime(MarketSimulator):
         finally:
             self.is_backtesting = False
             self.trader.is_backtesting = False
+            self.futures_trader.is_backtesting = False
 
     def _fetch_historical(
         self, token: str, instrument: dict, start: datetime, end: datetime
@@ -322,6 +339,41 @@ class IndstocksMarketRuntime(MarketSimulator):
         cache_dir = os.getenv("ZERODHA_CACHE_DIR")
         if cache_dir:
             return self._load_zerodha_cache(cache_dir, instrument["symbol"], start, end)
+
+        chunk_days = int(self.indstocks.get("historical_chunk_days", 5))
+        span_days = (end - start).total_seconds() / 86400
+        if span_days <= chunk_days:
+            return self._fetch_historical_once(token, instrument, start, end)
+
+        symbol = instrument["symbol"]
+        all_candles: list[Candle] = []
+        seen: set[datetime] = set()
+        current = start
+        chunk_num = 0
+        while current < end:
+            nxt = min(current + timedelta(days=chunk_days), end)
+            chunk = self._fetch_historical_once(token, instrument, current, nxt)
+            for candle in chunk:
+                if candle.time not in seen:
+                    seen.add(candle.time)
+                    all_candles.append(candle)
+            chunk_num += 1
+            if current + timedelta(days=chunk_days) < end:
+                time.sleep(0.25)
+            current = nxt
+
+        all_candles.sort(key=lambda c: c.time)
+        if all_candles:
+            print(
+                f"📦 Chunked fetch {symbol}: {len(all_candles)} candles "
+                f"({all_candles[0].time.date()} → {all_candles[-1].time.date()}, {chunk_num} chunks)"
+            )
+        return all_candles
+
+    def _fetch_historical_once(
+        self, token: str, instrument: dict, start: datetime, end: datetime
+    ) -> list[Candle]:
+        """Single INDstocks historical API request (capped to ~4 trading days of 1m data)."""
         for attempt in range(3):
             try:
                 response = httpx.get(
@@ -340,7 +392,8 @@ class IndstocksMarketRuntime(MarketSimulator):
                 response.raise_for_status()
                 break
             except Exception as e:
-                if attempt == 2: raise e
+                if attempt == 2:
+                    raise e
                 time.sleep(1)
         payload = response.json()
         raw_candles = self._extract_historical_candles(payload, instrument["historical_scrip_code"])
@@ -753,7 +806,7 @@ class IndstocksMarketRuntime(MarketSimulator):
             chain=chain_rows[:11]
         )
 
-    def _structure_allows_entry(self, symbol: str, direction: str) -> bool:
+    def _structure_allows_entry(self, symbol: str, direction: str, strategy_name: str | None = None) -> bool:
         """Gate entries using regime classification from AIRegimeAgent."""
         from services.chartedge_core.structures import select_structure
         regime = self._regime_by_symbol.get(symbol, "")
@@ -761,7 +814,7 @@ class IndstocksMarketRuntime(MarketSimulator):
             return True  # no regime info yet — allow
         iv_rank = self._iv_rank_by_symbol.get(symbol, 50.0)
         strike_offset_config = self.config.risk.get("options_strike_offset", 0)
-        
+
         optimal_strategy = "NAKED_BUY"
         if self.latest_indicators and symbol in self.latest_indicators:
             regime_info = self.latest_indicators[symbol].regime_info
@@ -788,18 +841,20 @@ class IndstocksMarketRuntime(MarketSimulator):
             return result.legs[0].strike_offset
         return int(self.config.risk.get("options_strike_offset", 0))
 
-    def get_multi_leg_structure(self, symbol: str, direction: str) -> Optional[dict]:
+    def get_multi_leg_structure(
+        self, symbol: str, direction: str, strategy_name: str | None = None
+    ) -> Optional[dict]:
         """Resolves an index signal to a Multi-Leg OptionStructure."""
         if not self.dm or symbol not in ["NIFTY", "BANKNIFTY"]:
             return None
-            
+
         spot = self.candles[symbol][-1].close if self.candles.get(symbol) else 0
-        if spot <= 0: return None
-        
+        if spot <= 0:
+            return None
+
         regime = self._regime_by_symbol.get(symbol, "")
         iv_rank = self._iv_rank_by_symbol.get(symbol, 50.0)
-        
-        # Read the optimal strategy directly from the latest snapshot if available
+
         optimal_strategy = "NAKED_BUY"
         latest_indicators = getattr(self, "latest_indicators", {})
         if latest_indicators and symbol in latest_indicators:
@@ -809,8 +864,7 @@ class IndstocksMarketRuntime(MarketSimulator):
 
         from services.chartedge_core.structures import select_structure
         opt_dir = "CE" if direction == "BUY" else "PE"
-        
-        # Resolve the structure rules (Leg definitions)
+
         struct = select_structure(
             regime=regime,
             direction=opt_dir,

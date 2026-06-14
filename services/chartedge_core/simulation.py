@@ -15,6 +15,7 @@ from services.chartedge_core.indicators import compute_snapshot_indicators
 from services.chartedge_core.models import Candle, DashboardSnapshot, Direction, IndicatorSnapshot, Signal
 from services.chartedge_core.option_data import bs_price, bs_delta, iv_from_vix
 from services.chartedge_core.paper_trading import PaperTradingEngine
+from services.chartedge_core.futures_trader import FuturesTradingEngine
 from services.chartedge_core.training_logger import training_logger, options_logger
 from services.chartedge_core.regime_detector import RegimeDetector
 
@@ -51,6 +52,12 @@ class MarketSimulator:
         self.regime_detectors: dict[str, RegimeDetector] = {
             symbol: RegimeDetector() for symbol in config.enabled_symbols
         }
+        # Futures engine — separate from options PaperTradingEngine
+        futures_risk_cfg = getattr(config, "futures_risk", {})
+        self.futures_trader = FuturesTradingEngine(
+            futures_risk_cfg=futures_risk_cfg,
+            is_backtesting=skip_db_load,  # skip_db_load == True during backtests
+        )
 
     async def seed(self) -> None:
         now = datetime.now(IST).replace(second=0, microsecond=0) - timedelta(minutes=180)
@@ -135,11 +142,11 @@ class MarketSimulator:
         """Stub for resolving options - overridden in IndstocksMarketRuntime."""
         return None
 
-    def get_multi_leg_structure(self, symbol: str, direction: str) -> Optional[dict]:
+    def get_multi_leg_structure(self, symbol: str, direction: str, strategy_name: str | None = None) -> Optional[dict]:
         """Stub for resolving multi-leg options - overridden in IndstocksMarketRuntime."""
         return None
 
-    def _structure_allows_entry(self, symbol: str, direction: str) -> bool:
+    def _structure_allows_entry(self, symbol: str, direction: str, strategy_name: str | None = None) -> bool:
         """Return False to block an option entry. Override in live runtime for regime gating."""
         return True
 
@@ -206,6 +213,12 @@ class MarketSimulator:
         if symbol in self.config.trading_symbols:
             snapshot = self.latest_indicators.get(symbol)
             await self.trader.mark_to_market(candle, snapshot, ltp_map=self._token_ltp)
+
+            # Futures MTM: update on every NIFTY candle
+            if symbol == "NIFTY" and self.futures_trader.open_positions:
+                st_ind = snapshot.indicators.get("supertrend") if snapshot else None
+                st_val = st_ind.value if (st_ind and isinstance(st_ind.value, (int, float))) else None
+                await self.futures_trader.mark_to_market(candle, supertrend_value=st_val)
             
             # 2. Strategy-specific exits and SL updates
             for trade in list(self.trader.open_positions.values()):
@@ -413,15 +426,27 @@ class MarketSimulator:
                 print(f"⛔ [T315 Bias] {symbol} T315 {opt_type} blocked — regime bias is {bias}")
                 return
 
+        # FUTURES ROUTING: NIFTY_FUT signals go directly to FuturesTradingEngine
+        if signal.instrument == "NIFTY_FUT":
+            print(f"🔀 [Router] {signal.instrument} futures signal → FuturesTradingEngine")
+            self.signals.insert(0, signal)
+            self.signals = self.signals[:80]
+            # Use the NIFTY candle price (spot ≈ futures in simulation)
+            fut_candle = next_open.model_copy()
+            fut_candle.instrument = "NIFTY_FUT"
+            await self.futures_trader.maybe_enter(signal, fut_candle)
+            return
+
         # OPTIONS PROXY LOGIC: Check for ATM option contract if it's a trading index
         if symbol in ["NIFTY", "BANKNIFTY"] and signal.signal != Direction.HOLD:
             preferred_side_check = signal.option_type if signal.option_type else signal.signal.value
-            if not self._structure_allows_entry(symbol, preferred_side_check):
+            strategy_name = getattr(signal, "strategy_name", None)
+            if not self._structure_allows_entry(symbol, preferred_side_check, strategy_name):
                 print(f"🚫 [Structure Gate] {symbol} {preferred_side_check} blocked by regime/IV filter")
                 return
             # If the signal has an explicit option_type (CE/PE), use it. Otherwise fallback to sentiment.
             preferred_side = signal.option_type if signal.option_type else signal.signal.value
-            multi_leg = self.get_multi_leg_structure(symbol, preferred_side)
+            multi_leg = self.get_multi_leg_structure(symbol, preferred_side, strategy_name)
             
             if multi_leg and multi_leg.get("legs"):
                 print(f"🎯 Creating Multi-Leg Trade for {symbol}: {multi_leg['strategy_name']}")
@@ -553,6 +578,7 @@ class MarketSimulator:
         self.signals.clear()
         self.equity_curve.clear()
         self.trader.reset()
+        self.futures_trader.reset()
 
     async def kill_switch(self) -> DashboardSnapshot:
         prices = {symbol: candles[-1].close for symbol, candles in self.candles.items() if candles}

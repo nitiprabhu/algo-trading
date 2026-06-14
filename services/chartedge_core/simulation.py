@@ -57,6 +57,7 @@ class MarketSimulator:
         self.futures_trader = FuturesTradingEngine(
             futures_risk_cfg=futures_risk_cfg,
             is_backtesting=skip_db_load,  # skip_db_load == True during backtests
+            risk_config=config.risk,
         )
 
     async def seed(self) -> None:
@@ -206,6 +207,7 @@ class MarketSimulator:
                 self.trader.consecutive_losses = 0
                 self.trader.cooldown_until = None
                 self.trader.blocked_directions.clear()
+                self.futures_trader.reset_daily_state()
                 self.signal_engine.t315_direction_lock.clear()
             self._last_trading_date = candle_date
 
@@ -428,6 +430,15 @@ class MarketSimulator:
 
         # FUTURES ROUTING: NIFTY_FUT signals go directly to FuturesTradingEngine
         if signal.instrument == "NIFTY_FUT":
+            strategy_name = getattr(signal, "strategy_name", None) or ""
+            if strategy_name.startswith("FUT_") and self.config.risk.get("trade_only_trending", True):
+                regime = getattr(self, "_regime_by_symbol", {}).get("NIFTY", "")
+                if regime in ("RANGE_BOUND_CHOP", "MEAN_REVERTING"):
+                    print(
+                        f"⛔ [FUT Regime] {strategy_name} blocked — {regime} "
+                        "(ORB momentum unreliable on chop days)"
+                    )
+                    return
             print(f"🔀 [Router] {signal.instrument} futures signal → FuturesTradingEngine")
             self.signals.insert(0, signal)
             self.signals = self.signals[:80]

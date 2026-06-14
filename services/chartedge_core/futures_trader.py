@@ -14,7 +14,7 @@ Key differences from the options PaperTradingEngine:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time
+from datetime import datetime, timedelta, time
 from typing import Optional
 from uuid import uuid4
 
@@ -98,7 +98,12 @@ class FuturesTradingEngine:
     index-point SL, etc.).
     """
 
-    def __init__(self, futures_risk_cfg: dict, is_backtesting: bool = False):
+    def __init__(
+        self,
+        futures_risk_cfg: dict,
+        is_backtesting: bool = False,
+        risk_config: dict | None = None,
+    ):
         cfg = futures_risk_cfg.get("NIFTY_FUT", {})
         self.lot_size    = int(cfg.get("lot_size", NIFTY_FUT_LOT))
         self.max_lots    = int(cfg.get("max_lots", 1))
@@ -106,10 +111,13 @@ class FuturesTradingEngine:
         self.t1_points   = float(cfg.get("target_1_points", 75))
         self.t2_points   = float(cfg.get("target_2_points", 150))
         self.is_backtesting = is_backtesting
+        self.risk_config = risk_config or {}
 
         self.open_positions: dict[str, FuturesTrade] = {}   # instrument → trade
         self.closed_trades:  list[FuturesTrade]      = []
         self.kill_switch = False
+        self.consecutive_losses = 0
+        self.cooldown_until: datetime | None = None
         self.apply_costs = True
 
     def _resolve_levels(
@@ -149,6 +157,8 @@ class FuturesTradingEngine:
 
         # Gates
         if self.kill_switch:
+            return None
+        if self.cooldown_until is not None and candle.time < self.cooldown_until:
             return None
         if t < time(9, 15) or t >= ENTRY_CUTOFF:
             return None
@@ -261,6 +271,15 @@ class FuturesTradingEngine:
                     trade.sl_price = trade.entry_price
                     print(f"🎯 [Futures] T1 hit — SL moved to breakeven {trade.entry_price}")
 
+        # Daily circuit breaker — same -2% cap as options engine
+        m = self.metrics()
+        total_capital = self.risk_config.get("total_capital", 500000.0)
+        dd_pct = round(((m["futures_realized_pnl"] + m["futures_open_pnl"]) / total_capital) * 100, 2)
+        dd_limit = self.risk_config.get("daily_drawdown_pause_pct", 2.0)
+        if dd_pct <= -abs(dd_limit):
+            print(f"🛑 [Futures] CIRCUIT BREAKER: daily drawdown {dd_pct}% (limit: -{dd_limit}%)")
+            await self.force_close_all({instrument: candle.close for instrument in self.open_positions}, candle.time, "KILL_SWITCH")
+
     # ─────────────────────────── Close helper ─────────────────────────────────
 
     async def _close(self, trade: FuturesTrade, price: float, at: datetime, reason: str) -> None:
@@ -293,6 +312,25 @@ class FuturesTradingEngine:
             f"Entry={trade.entry_price} Exit={actual_price} PnL=₹{trade.pnl:+.2f}{cost_suffix} ({reason})"
         )
 
+        if trade.pnl < 0:
+            self.consecutive_losses += 1
+            halt_after = self.risk_config.get("daily_halt_after_losses", 4)
+            cooldown_after = self.risk_config.get("cooldown_after_losses", 2)
+            if self.consecutive_losses >= halt_after:
+                print(f"🛑 [Futures] KILL SWITCH: {self.consecutive_losses} consecutive losses")
+                self.kill_switch = True
+            elif self.consecutive_losses >= cooldown_after:
+                self.cooldown_until = at + timedelta(minutes=45)
+                print(
+                    f"⏸️  [Futures] COOLDOWN: {self.consecutive_losses} consecutive losses "
+                    f"— no new entries until {self.cooldown_until.strftime('%H:%M')}"
+                )
+        else:
+            if self.consecutive_losses > 0:
+                print(f"✅ [Futures] Consecutive loss streak reset (was {self.consecutive_losses})")
+            self.consecutive_losses = 0
+            self.cooldown_until = None
+
         if not self.is_backtesting:
             persist_trade_exit(
                 str(trade.id), actual_price, at, reason, trade.pnl, trade.pnl_pct
@@ -304,10 +342,16 @@ class FuturesTradingEngine:
             price = price_map.get(trade.instrument, trade.entry_price)
             await self._close(trade, price, now, reason)
 
+    def reset_daily_state(self) -> None:
+        """Reset per-day risk counters (called at day boundary in simulation)."""
+        self.kill_switch = False
+        self.consecutive_losses = 0
+        self.cooldown_until = None
+
     def reset(self) -> None:
         self.open_positions.clear()
         self.closed_trades.clear()
-        self.kill_switch = False
+        self.reset_daily_state()
 
     # ─────────────────────────── Metrics ──────────────────────────────────────
 

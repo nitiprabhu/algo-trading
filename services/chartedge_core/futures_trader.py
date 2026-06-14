@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from services.chartedge_core.models import Candle, Direction, PaperTrade, PositionStatus, Signal
 from services.chartedge_core.database import persist_trade_entry, persist_trade_exit
+from services.chartedge_core.costs import futures_entry_cost, futures_round_trip_cost
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -109,6 +110,36 @@ class FuturesTradingEngine:
         self.open_positions: dict[str, FuturesTrade] = {}   # instrument → trade
         self.closed_trades:  list[FuturesTrade]      = []
         self.kill_switch = False
+        self.apply_costs = True
+
+    def _resolve_levels(
+        self, signal: Signal, direction: Direction, entry_price: float
+    ) -> tuple[float, float, float]:
+        """Use strategy SL/T1/T2 when valid; otherwise fall back to fixed point offsets."""
+        use_signal = signal.strategy_name in ("FUT_ORB", "FUT_ORB_SESSION", "FUT_MID", "FUT_CLOSE") or (
+            signal.strategy_name or ""
+        ).startswith("FUT_")
+
+        if use_signal and signal.stop_loss:
+            sl = round(signal.stop_loss, 2)
+            t1 = round(signal.target_1, 2)
+            t2 = round(signal.target_2, 2)
+            if direction == Direction.BUY and sl < entry_price < t1 <= t2:
+                return sl, t1, t2
+            if direction == Direction.SELL and sl > entry_price > t1 >= t2:
+                return sl, t1, t2
+
+        if direction == Direction.BUY:
+            return (
+                round(entry_price - self.sl_points, 2),
+                round(entry_price + self.t1_points, 2),
+                round(entry_price + self.t2_points, 2),
+            )
+        return (
+            round(entry_price + self.sl_points, 2),
+            round(entry_price - self.t1_points, 2),
+            round(entry_price - self.t2_points, 2),
+        )
 
     # ─────────────────────────── Entry ────────────────────────────────────────
 
@@ -129,15 +160,12 @@ class FuturesTradingEngine:
 
         direction   = signal.signal
         entry_price = round(candle.open * (1.0005 if direction == Direction.BUY else 0.9995), 2)
+        sl_price, t1_price, t2_price = self._resolve_levels(signal, direction, entry_price)
 
-        if direction == Direction.BUY:
-            sl_price = round(entry_price - self.sl_points, 2)
-            t1_price = round(entry_price + self.t1_points, 2)
-            t2_price = round(entry_price + self.t2_points, 2)
-        else:
-            sl_price = round(entry_price + self.sl_points, 2)
-            t1_price = round(entry_price - self.t1_points, 2)
-            t2_price = round(entry_price - self.t2_points, 2)
+        entry_costs = (
+            futures_entry_cost(entry_price, self.lot_size * self.max_lots, direction.value).total
+            if self.apply_costs else 0.0
+        )
 
         trade = FuturesTrade(
             signal=signal,
@@ -151,9 +179,10 @@ class FuturesTradingEngine:
         )
 
         self.open_positions[signal.instrument] = trade
+        cost_suffix = f" Costs=₹{entry_costs:.2f}" if self.apply_costs else ""
         print(
             f"🚀 [FUTURES ENTERED] {signal.instrument} {direction.value} @ {entry_price} | "
-            f"SL={sl_price} T1={t1_price} T2={t2_price} ({candle.time})"
+            f"SL={sl_price} T1={t1_price} T2={t2_price}{cost_suffix} ({candle.time})"
         )
 
         if not self.is_backtesting:
@@ -239,7 +268,14 @@ class FuturesTradingEngine:
         actual_price = round(price * slippage, 2)
         direction_mult = 1 if trade.direction == Direction.BUY else -1
 
-        trade.pnl        = round((actual_price - trade.entry_price) * direction_mult * trade.quantity, 2)
+        gross_pnl = round((actual_price - trade.entry_price) * direction_mult * trade.quantity, 2)
+        costs = (
+            futures_round_trip_cost(
+                trade.entry_price, actual_price, trade.quantity, trade.direction.value
+            )
+            if self.apply_costs else 0.0
+        )
+        trade.pnl        = round(gross_pnl - costs, 2)
         trade.pnl_pct    = round(trade.pnl / trade.invested_amount * 100, 2)
         trade.exit_price  = actual_price
         trade.exit_time   = at
@@ -251,9 +287,10 @@ class FuturesTradingEngine:
         self.closed_trades = self.closed_trades[-200:]
 
         pnl_emoji = "✅" if trade.pnl >= 0 else "❌"
+        cost_suffix = f" Costs=₹{costs:.2f}" if self.apply_costs else ""
         print(
             f"{pnl_emoji} [FUTURES CLOSED] {trade.instrument} {trade.direction.value} | "
-            f"Entry={trade.entry_price} Exit={actual_price} PnL=₹{trade.pnl:+.2f} ({reason})"
+            f"Entry={trade.entry_price} Exit={actual_price} PnL=₹{trade.pnl:+.2f}{cost_suffix} ({reason})"
         )
 
         if not self.is_backtesting:

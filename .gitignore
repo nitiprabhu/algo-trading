@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.telegram_chat_id
 
 # Python virtual environment and packaging
 .venv/

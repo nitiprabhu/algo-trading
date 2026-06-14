@@ -1,0 +1,362 @@
+[
+  {
+    "instrument": "NIFTY-Jun2026-22750-PE",
+    "side": "PE",
+    "entry_time": "2026-04-01 13:45",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -624.63,
+    "pnl_pct": -8.97,
+    "mfe_pct": 0.0,
+    "left_on_table": 8.97
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-51600-CE",
+    "side": "CE",
+    "entry_time": "2026-04-01 14:15",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -1379.9,
+    "pnl_pct": -8.13,
+    "mfe_pct": 0.0,
+    "left_on_table": 8.13
+  },
+  {
+    "instrument": "NIFTY-Jun2026-22800-CE",
+    "side": "CE",
+    "entry_time": "2026-04-06 13:15",
+    "exit_reason": "SL",
+    "pnl": -142.18,
+    "pnl_pct": -1.64,
+    "mfe_pct": 8.81,
+    "left_on_table": 10.45
+  },
+  {
+    "instrument": "NIFTY-Jun2026-22850-CE",
+    "side": "CE",
+    "entry_time": "2026-04-06 14:15",
+    "exit_reason": "EOD_SQUAREOFF",
+    "pnl": -142.09,
+    "pnl_pct": -1.65,
+    "mfe_pct": 5.11,
+    "left_on_table": 6.76
+  },
+  {
+    "instrument": "NIFTY-Jun2026-22900-CE",
+    "side": "CE",
+    "entry_time": "2026-04-07 13:30",
+    "exit_reason": "SL",
+    "pnl": 1131.99,
+    "pnl_pct": 13.3,
+    "mfe_pct": 30.11,
+    "left_on_table": 16.81
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-55300-CE",
+    "side": "CE",
+    "entry_time": "2026-04-08 12:05",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -1616.27,
+    "pnl_pct": -8.24,
+    "mfe_pct": 2.71,
+    "left_on_table": 10.95
+  },
+  {
+    "instrument": "NIFTY-Jun2026-23900-CE",
+    "side": "CE",
+    "entry_time": "2026-04-08 12:45",
+    "exit_reason": "SL",
+    "pnl": 547.37,
+    "pnl_pct": 5.14,
+    "mfe_pct": 24.95,
+    "left_on_table": 19.81
+  },
+  {
+    "instrument": "NIFTY-Jun2026-23900-PE",
+    "side": "PE",
+    "entry_time": "2026-04-09 11:17",
+    "exit_reason": "SL",
+    "pnl": -192.04,
+    "pnl_pct": -2.24,
+    "mfe_pct": 14.15,
+    "left_on_table": 16.39
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-55700-CE",
+    "side": "CE",
+    "entry_time": "2026-04-10 13:15",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -1184.09,
+    "pnl_pct": -8.31,
+    "mfe_pct": 23.8,
+    "left_on_table": 32.11
+  },
+  {
+    "instrument": "NIFTY-Jun2026-23750-CE",
+    "side": "CE",
+    "entry_time": "2026-04-13 13:30",
+    "exit_reason": "SL",
+    "pnl": 956.71,
+    "pnl_pct": 13.07,
+    "mfe_pct": 25.73,
+    "left_on_table": 12.66
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24150-CE",
+    "side": "CE",
+    "entry_time": "2026-04-15 11:18",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -915.19,
+    "pnl_pct": -8.88,
+    "mfe_pct": 1.18,
+    "left_on_table": 10.06
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-56400-PE",
+    "side": "PE",
+    "entry_time": "2026-04-15 11:58",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -1268.17,
+    "pnl_pct": -8.57,
+    "mfe_pct": 0.77,
+    "left_on_table": 9.34
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24350-PE",
+    "side": "PE",
+    "entry_time": "2026-04-16 11:00",
+    "exit_reason": "SL",
+    "pnl": -519.98,
+    "pnl_pct": -6.81,
+    "mfe_pct": 0.0,
+    "left_on_table": 6.81
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-56100-PE",
+    "side": "PE",
+    "entry_time": "2026-04-16 13:00",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -943.69,
+    "pnl_pct": -8.65,
+    "mfe_pct": 0.42,
+    "left_on_table": 9.07
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24250-CE",
+    "side": "CE",
+    "entry_time": "2026-04-17 12:09",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -877.63,
+    "pnl_pct": -8.98,
+    "mfe_pct": 0.42,
+    "left_on_table": 9.4
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-56300-CE",
+    "side": "CE",
+    "entry_time": "2026-04-17 13:30",
+    "exit_reason": "EOD_SQUAREOFF",
+    "pnl": -187.28,
+    "pnl_pct": -1.39,
+    "mfe_pct": 37.8,
+    "left_on_table": 39.19
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24500-PE",
+    "side": "PE",
+    "entry_time": "2026-04-20 10:50",
+    "exit_reason": "SL",
+    "pnl": -189.86,
+    "pnl_pct": -2.47,
+    "mfe_pct": 9.4,
+    "left_on_table": 11.87
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-56900-CE",
+    "side": "CE",
+    "entry_time": "2026-04-20 11:59",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -1551.91,
+    "pnl_pct": -8.29,
+    "mfe_pct": 3.28,
+    "left_on_table": 11.57
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24450-CE",
+    "side": "CE",
+    "entry_time": "2026-04-21 10:32",
+    "exit_reason": "SL",
+    "pnl": 500.58,
+    "pnl_pct": 5.03,
+    "mfe_pct": 20.07,
+    "left_on_table": 15.04
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24500-CE",
+    "side": "CE",
+    "entry_time": "2026-04-21 11:47",
+    "exit_reason": "SL",
+    "pnl": -194.92,
+    "pnl_pct": -1.97,
+    "mfe_pct": 10.88,
+    "left_on_table": 12.85
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-57200-CE",
+    "side": "CE",
+    "entry_time": "2026-04-21 13:00",
+    "exit_reason": "SL",
+    "pnl": -187.94,
+    "pnl_pct": -1.35,
+    "mfe_pct": 10.29,
+    "left_on_table": 11.64
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24500-PE",
+    "side": "PE",
+    "entry_time": "2026-04-22 11:02",
+    "exit_reason": "SL",
+    "pnl": -190.13,
+    "pnl_pct": -2.42,
+    "mfe_pct": 9.76,
+    "left_on_table": 12.18
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-57200-CE",
+    "side": "CE",
+    "entry_time": "2026-04-22 12:31",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -1572.15,
+    "pnl_pct": -8.27,
+    "mfe_pct": 1.06,
+    "left_on_table": 9.33
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24450-PE",
+    "side": "PE",
+    "entry_time": "2026-04-22 12:11",
+    "exit_reason": "SL",
+    "pnl": -189.96,
+    "pnl_pct": -2.45,
+    "mfe_pct": 10.57,
+    "left_on_table": 13.02
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24150-CE",
+    "side": "CE",
+    "entry_time": "2026-04-23 10:59",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -913.66,
+    "pnl_pct": -8.88,
+    "mfe_pct": 1.09,
+    "left_on_table": 9.97
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-56000-PE",
+    "side": "PE",
+    "entry_time": "2026-04-24 11:03",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -1303.71,
+    "pnl_pct": -8.53,
+    "mfe_pct": 6.78,
+    "left_on_table": 15.31
+  },
+  {
+    "instrument": "NIFTY-Jun2026-23950-PE",
+    "side": "PE",
+    "entry_time": "2026-04-24 12:22",
+    "exit_reason": "SL",
+    "pnl": 375.54,
+    "pnl_pct": 4.63,
+    "mfe_pct": 18.1,
+    "left_on_table": 13.47
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-56200-PE",
+    "side": "PE",
+    "entry_time": "2026-04-27 10:59",
+    "exit_reason": "SL",
+    "pnl": -234.54,
+    "pnl_pct": -1.61,
+    "mfe_pct": 9.53,
+    "left_on_table": 11.14
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24000-CE",
+    "side": "CE",
+    "entry_time": "2026-04-27 10:42",
+    "exit_reason": "SL",
+    "pnl": 519.6,
+    "pnl_pct": 5.08,
+    "mfe_pct": 18.6,
+    "left_on_table": 13.52
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24100-PE",
+    "side": "PE",
+    "entry_time": "2026-04-27 12:43",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -744.35,
+    "pnl_pct": -9.38,
+    "mfe_pct": 1.96,
+    "left_on_table": 11.34
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24050-CE",
+    "side": "CE",
+    "entry_time": "2026-04-27 13:30",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -608.79,
+    "pnl_pct": -9.03,
+    "mfe_pct": 6.79,
+    "left_on_table": 15.82
+  },
+  {
+    "instrument": "NIFTY-Jun2026-24100-CE",
+    "side": "CE",
+    "entry_time": "2026-04-28 10:49",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -865.38,
+    "pnl_pct": -9.0,
+    "mfe_pct": 6.84,
+    "left_on_table": 15.84
+  },
+  {
+    "instrument": "NIFTY-Jun2026-23800-CE",
+    "side": "CE",
+    "entry_time": "2026-04-30 10:22",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -916.72,
+    "pnl_pct": -8.88,
+    "mfe_pct": 0.0,
+    "left_on_table": 8.88
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-54400-CE",
+    "side": "CE",
+    "entry_time": "2026-04-30 10:37",
+    "exit_reason": "SL",
+    "pnl": 1072.22,
+    "pnl_pct": 5.69,
+    "mfe_pct": 15.61,
+    "left_on_table": 9.92
+  },
+  {
+    "instrument": "NIFTY-Jun2026-23950-PE",
+    "side": "PE",
+    "entry_time": "2026-04-30 12:33",
+    "exit_reason": "MAX_LOSS_GUARD",
+    "pnl": -740.51,
+    "pnl_pct": -9.4,
+    "mfe_pct": 0.0,
+    "left_on_table": 9.4
+  },
+  {
+    "instrument": "BANKNIFTY-Jun2026-54700-CE",
+    "side": "CE",
+    "entry_time": "2026-04-30 13:15",
+    "exit_reason": "SL",
+    "pnl": 2831.82,
+    "pnl_pct": 20.59,
+    "mfe_pct": 41.63,
+    "left_on_table": 21.04
+  }
+]

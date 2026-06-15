@@ -35,9 +35,9 @@ async def lifespan(app: FastAPI):
     # Run sync and run loop in background
     asyncio.create_task(runtime.run())
     
-    # Initialize Telegram Chat ID resolution on startup
+    # Start Telegram Command Listener on startup
     from services.chartedge_core.telegram import notifier
-    asyncio.create_task(notifier.resolve_chat_id())
+    asyncio.create_task(notifier.start_listening(runtime))
     
     # Background config sync in a thread to avoid blocking the event loop
     if os.getenv("DATABASE_URL"):

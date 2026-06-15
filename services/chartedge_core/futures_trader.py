@@ -119,6 +119,62 @@ class FuturesTradingEngine:
         self.consecutive_losses = 0
         self.cooldown_until: datetime | None = None
         self.apply_costs = True
+        
+        if not is_backtesting:
+            self.load_active_trades()
+
+    def load_active_trades(self) -> None:
+        """Load open futures trades from the database to resume tracking after a restart."""
+        from services.chartedge_core.database import get_open_trades
+        from uuid import UUID
+        records = get_open_trades()
+        for r in records:
+            is_fut = "_FUT" in r.symbol or r.symbol.endswith("_FUT")
+            if not is_fut:
+                continue
+                
+            from zoneinfo import ZoneInfo
+            from datetime import timezone
+            IST = ZoneInfo("Asia/Kolkata")
+            entry_time = r.entry_time
+            if entry_time is not None:
+                if entry_time.tzinfo is None:
+                    entry_time = entry_time.replace(tzinfo=timezone.utc).astimezone(IST).replace(tzinfo=None)
+                else:
+                    entry_time = entry_time.astimezone(IST).replace(tzinfo=None)
+
+                
+            class DummySignal:
+                def __init__(self, sid, inst, d):
+                    self.id = sid
+                    self.instrument = inst
+                    self.signal = d
+                    
+            dummy_signal = DummySignal(
+                UUID(r.signal_id), 
+                r.symbol, 
+                Direction.BUY if r.direction == "BUY" else Direction.SELL
+            )
+            
+            trade = FuturesTrade(
+                signal=dummy_signal,
+                entry_price=r.entry_price,
+                entry_time=entry_time,
+                sl_price=r.sl_price,
+                t1_price=r.t1_price,
+                t2_price=r.t2_price,
+                lot_size=self.lot_size,
+                max_lots=self.max_lots
+            )
+            trade.id = UUID(r.trade_id)
+            trade.pnl = r.pnl
+            trade.pnl_pct = r.pnl_pct
+            trade.t1_hit = r.t1_hit
+            trade.highest_pnl_pct = getattr(r, "highest_pnl_pct", 0.0)
+            trade.invested_amount = r.invested_amount
+            
+            self.open_positions[trade.instrument] = trade
+            print(f"🔄 Recovered active futures trade: {trade.direction.value} {trade.instrument} from {trade.entry_time}")
 
     def _resolve_levels(
         self, signal: Signal, direction: Direction, entry_price: float
@@ -208,8 +264,19 @@ class FuturesTradingEngine:
         candle: Candle,
         supertrend_value: Optional[float] = None,
     ) -> None:
-        """Update all open positions and check exits."""
         for instrument, trade in list(self.open_positions.items()):
+            t_candle = candle.time
+            t_entry  = trade.entry_time
+            # Make timezone-aware comparison safe
+            if t_candle.tzinfo is not None and t_entry.tzinfo is None:
+                t_candle = t_candle.replace(tzinfo=None)
+            elif t_candle.tzinfo is None and t_entry.tzinfo is not None:
+                t_entry = t_entry.replace(tzinfo=None)
+            if t_candle < t_entry:
+                trade.pnl = 0.0
+                trade.pnl_pct = 0.0
+                continue
+
             # Price discovery: futures price tracks spot closely (basis ≈ 5–15 pts)
             # In live, we'd get the actual futures LTP. In backtest, spot ≈ futures.
             current_price = candle.close
@@ -219,16 +286,6 @@ class FuturesTradingEngine:
             trade.pnl     = round((current_price - trade.entry_price) * direction_mult * trade.quantity, 2)
             trade.pnl_pct = round(trade.pnl / trade.invested_amount * 100, 2)
             trade.highest_pnl_pct = max(trade.highest_pnl_pct, trade.pnl_pct)
-
-            t_candle = candle.time
-            t_entry  = trade.entry_time
-            # Make timezone-aware comparison safe
-            if t_candle.tzinfo is not None and t_entry.tzinfo is None:
-                t_candle = t_candle.replace(tzinfo=None)
-            elif t_candle.tzinfo is None and t_entry.tzinfo is not None:
-                t_entry = t_entry.replace(tzinfo=None)
-            if t_candle < t_entry:
-                continue
 
             # ── 1. EOD Hard Exit ───────────────────────────────────────────
             if candle.time.time() >= EOD_EXIT_TIME:
@@ -332,9 +389,7 @@ class FuturesTradingEngine:
             self.cooldown_until = None
 
         if not self.is_backtesting:
-            persist_trade_exit(
-                str(trade.id), actual_price, at, reason, trade.pnl, trade.pnl_pct
-            )
+            persist_trade_exit(trade.to_paper_trade())
             await self._send_telegram_exit(trade)
 
     async def force_close_all(self, price_map: dict[str, float], now: datetime, reason: str) -> None:

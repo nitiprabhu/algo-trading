@@ -495,6 +495,11 @@ class IndstocksMarketRuntime(MarketSimulator):
                         self.signal_engine.thresholds["DEFAULT"] = min(nifty_thresh, bn_thresh)
                     except Exception as ra_err:
                         print(f"⚠️ Failed to run AI Regime Agent at startup: {ra_err}. Continuing with default thresholds.")
+                    
+                    try:
+                        self.reconstruct_recovered_option_legs()
+                    except Exception as rec_err:
+                        print(f"⚠️ Failed to reconstruct recovered option legs at startup: {rec_err}")
                     _seeded = True
                 
                 # Reload .env to pick up any manual token updates without restarting the server
@@ -631,6 +636,12 @@ class IndstocksMarketRuntime(MarketSimulator):
                         if row["pe_token"]: tokens.append(row["pe_token"])
                 except Exception as e:
                     print(f"FAILED_TO_GET_OPTION_CHAIN_TOKENS for {symbol}: {e}")
+        
+        # Add open option positions' legs to ensure we get live ticks for them
+        for trade in self.trader.open_positions.values():
+            for leg in getattr(trade, "legs", []):
+                if leg.instrument:
+                    tokens.append(leg.instrument)
         
         return list(set(tokens))
 
@@ -883,6 +894,7 @@ class IndstocksMarketRuntime(MarketSimulator):
             expiry_buffer = self.config.risk.get("options_expiry_buffer_days", 1)
             
             resolved_legs = []
+            expiry_str = ""
             for leg in struct.legs:
                 options = self.dm.get_atm_options(
                     spot, 
@@ -895,6 +907,9 @@ class IndstocksMarketRuntime(MarketSimulator):
                 if not contract_data:
                     return None  # If any leg fails to resolve, abort the structure
                 
+                if "expiry" in contract_data:
+                    expiry_str = contract_data["expiry"]
+                
                 token_id = contract_data["token"].split(":", 1)[1]
                 resolved_legs.append({
                     "symbol": contract_data["symbol"],
@@ -906,9 +921,19 @@ class IndstocksMarketRuntime(MarketSimulator):
                     "option_type": leg.option_type
                 })
                 
+            # Format expiry string (e.g. 25-Jun-2026 -> 25JUN26)
+            fmt_expiry = ""
+            if expiry_str:
+                try:
+                    import pandas as pd
+                    fmt_expiry = "_" + pd.to_datetime(expiry_str).strftime("%d%b%y").upper()
+                except Exception:
+                    fmt_expiry = f"_{expiry_str}"
+                    
             return {
                 "strategy_name": struct.strategy_name,
                 "reason": struct.reason,
+                "expiry_suffix": fmt_expiry,
                 "legs": resolved_legs
             }
         except Exception as e:

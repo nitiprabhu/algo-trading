@@ -3,7 +3,12 @@ import json
 import urllib.request
 import urllib.parse
 import asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional
+
+IST = ZoneInfo("Asia/Kolkata")
+
 
 class TelegramNotifier:
     def __init__(self):
@@ -116,5 +121,176 @@ class TelegramNotifier:
             print(f"Error sending message to Telegram: {e}")
             return False
 
+    async def start_listening(self, runtime) -> None:
+        """Background loop to poll `/getUpdates` and process user commands."""
+        # Wait until we have a chat ID resolved (so we know who to reply to)
+        if not self._chat_id:
+            print("DEBUG: Waiting for Telegram Chat ID to be resolved before listening...")
+            await self.resolve_chat_id()
+            
+        print(f"DEBUG: Starting Telegram Command listener loop for chat ID: {self._chat_id}...")
+        offset = 0
+        
+        # Load offset from updates first to avoid re-running old commands on startup
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+            def fetch_initial():
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    return json.loads(response.read().decode())
+            data = await asyncio.to_thread(fetch_initial)
+            results = data.get("result", [])
+            if results:
+                offset = max(r["update_id"] for r in results) + 1
+        except Exception as e:
+            print(f"DEBUG: Failed to initialize Telegram update offset: {e}")
+
+        while True:
+            try:
+                url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates?offset={offset}&timeout=10"
+                def fetch_updates():
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=15) as response:
+                        return json.loads(response.read().decode())
+
+                data = await asyncio.to_thread(fetch_updates)
+                results = data.get("result", [])
+                for r in results:
+                    offset = max(offset, r["update_id"] + 1)
+                    
+                    message = r.get("message")
+                    if not message:
+                        continue
+                        
+                    chat = message.get("chat", {})
+                    chat_id = str(chat.get("id"))
+                    
+                    # Only accept commands from our resolved chat ID
+                    if chat_id != self._chat_id:
+                        print(f"DEBUG: Ignoring message from unauthorized chat: {chat_id}")
+                        continue
+                        
+                    text = message.get("text", "").strip()
+                    if not text.startswith("/"):
+                        continue
+                        
+                    command = text.split()[0].lower()
+                    print(f"DEBUG: Received Telegram command: {command}")
+                    
+                    await self._handle_command(command, runtime)
+            except Exception as e:
+                print(f"Error polling Telegram updates: {e}")
+                
+            await asyncio.sleep(2)
+
+    async def _handle_command(self, command: str, runtime) -> None:
+        if command in ("/start", "/help"):
+            msg = (
+                "🤖 *ChartEdge AI Commands:*\n\n"
+                "📊 `/positions` - List all active open positions\n"
+                "💰 `/pnl` - Get realized & unrealized PnL summary\n"
+                "🏥 `/status` - Check server status and feed health\n"
+                "ℹ️ `/help` - Show this help menu"
+            )
+            await self.send_message(msg)
+            
+        elif command == "/status":
+            open_opts = len(runtime.trader.open_positions) if hasattr(runtime, "trader") else 0
+            open_futs = len(runtime.futures_trader.open_positions) if hasattr(runtime, "futures_trader") else 0
+            data_src = getattr(runtime, "data_source", "unknown")
+            if hasattr(runtime, "config") and hasattr(runtime.config, "data"):
+                data_src = runtime.config.data.get("source", data_src)
+            msg = (
+                f"🏥 *System Status:*\n\n"
+                f"⏱️ *Time:* `{datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S') if 'IST' in globals() else datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
+                f"📡 *Data Source:* `{data_src}`\n"
+                f"❤️ *Feed Health:* `{runtime.feed_health}`\n"
+                f"📂 *Open Positions:* `{open_opts + open_futs}` (Options: {open_opts}, Futures: {open_futs})"
+            )
+            await self.send_message(msg)
+            
+        elif command == "/positions":
+            opt_positions = list(runtime.trader.open_positions.values()) if hasattr(runtime, "trader") else []
+            fut_positions = list(runtime.futures_trader.open_positions.values()) if hasattr(runtime, "futures_trader") else []
+            
+            if not opt_positions and not fut_positions:
+                await self.send_message("📂 *Positions:*\n\nNo active open positions.")
+                return
+                
+            msg = "📂 *Active Positions:*\n\n"
+            
+            if opt_positions:
+                msg += "*Options Positions:*\n"
+                for trade in opt_positions:
+                    pnl_emoji = "🟢" if trade.pnl >= 0 else "🔴"
+                    msg += (
+                        f"• `{trade.instrument}` ({trade.direction.value})\n"
+                        f"  Qty: {trade.quantity} | Entry: `₹{trade.entry_price:.2f}`\n"
+                        f"  SL: `₹{trade.sl_price:.2f}` | T1: `₹{trade.t1_price:.2f}`\n"
+                        f"  PnL: {pnl_emoji} `₹{trade.pnl:.2f}` (`{trade.pnl_pct:+.2f}%`)\n"
+                    )
+                    if getattr(trade, "legs", []):
+                        msg += "  _Legs:_\n"
+                        for leg in trade.legs:
+                            msg += f"    - {leg.action.value} `{leg.instrument}` @ `₹{leg.entry_price:.2f}` (Strike: {leg.strike})\n"
+                msg += "\n"
+                
+            if fut_positions:
+                msg += "*Futures Positions:*\n"
+                for trade in fut_positions:
+                    pnl_emoji = "🟢" if trade.pnl >= 0 else "🔴"
+                    msg += (
+                        f"• `{trade.instrument}` ({trade.direction})\n"
+                        f"  Qty: {trade.quantity} | Entry: `₹{trade.entry_price:.2f}`\n"
+                        f"  SL: `₹{trade.sl_price:.2f}` | T1: `₹{trade.t1_price:.2f}`\n"
+                        f"  PnL: {pnl_emoji} `₹{trade.pnl:.2f}` (`{trade.pnl_pct:+.2f}%`)\n"
+                    )
+            await self.send_message(msg)
+            
+        elif command == "/pnl":
+            open_opts = list(runtime.trader.open_positions.values()) if hasattr(runtime, "trader") else []
+            raw_closed_opts = list(runtime.trader.closed_trades) if hasattr(runtime, "trader") else []
+            
+            # Filter options: exclude futures
+            closed_opts = [t for t in raw_closed_opts if not ("_FUT" in t.instrument or t.instrument.endswith("_FUT"))]
+            
+            unrealized_opts = sum(t.pnl for t in open_opts)
+            realized_opts = sum(t.pnl for t in closed_opts)
+            
+            open_futs = list(runtime.futures_trader.open_positions.values()) if hasattr(runtime, "futures_trader") else []
+            closed_futs = list(runtime.futures_trader.closed_trades) if hasattr(runtime, "futures_trader") else []
+            
+            # Also pull closed futures from raw_closed_opts if they exist there but not in closed_futs
+            for t in raw_closed_opts:
+                if "_FUT" in t.instrument or t.instrument.endswith("_FUT"):
+                    if str(t.id) not in [str(x.id) for x in closed_futs]:
+                        closed_futs.append(t)
+                        
+            unrealized_futs = sum(t.pnl for t in open_futs)
+            realized_futs = sum(t.pnl for t in closed_futs)
+            
+            total_unrealized = unrealized_opts + unrealized_futs
+            total_realized = realized_opts + realized_futs
+            total_pnl = total_unrealized + total_realized
+            
+            ur_emoji = "🟢" if total_unrealized >= 0 else "🔴"
+            re_emoji = "🟢" if total_realized >= 0 else "🔴"
+            tot_emoji = "🟢" if total_pnl >= 0 else "🔴"
+            
+            msg = (
+                f"💰 *PnL Summary:*\n\n"
+                f"*Unrealized PnL:* {ur_emoji} `₹{total_unrealized:.2f}`\n"
+                f"  - Options: `₹{unrealized_opts:.2f}`\n"
+                f"  - Futures: `₹{unrealized_futs:.2f}`\n\n"
+                f"*Realized PnL:* {re_emoji} `₹{total_realized:.2f}`\n"
+                f"  - Options: `₹{realized_opts:.2f}`\n"
+                f"  - Futures: `₹{realized_futs:.2f}`\n\n"
+                f"*Total PnL:* {tot_emoji} `₹{total_pnl:.2f}`"
+            )
+            await self.send_message(msg)
+        else:
+            await self.send_message("❓ Unknown command. Type `/help` for list of commands.")
+
 # Global notifier instance
 notifier = TelegramNotifier()
+

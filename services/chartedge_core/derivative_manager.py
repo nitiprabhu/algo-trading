@@ -74,6 +74,20 @@ class DerivativeManager:
         
         return f"NFO_{int(current_fut['SECURITY_ID'])}"
 
+    def get_futures_expiry_suffix(self, underlying: str = "NIFTY") -> str:
+        if self._fno_df is None: self._fetch_fno_master()
+        pattern = f"^{underlying}-"
+        mask = (self._fno_df['INSTRUMENT_NAME'] == 'FUTIDX') & (self._fno_df['TRADING_SYMBOL'].str.match(pattern, case=False, na=False))
+        futs = self._fno_df[mask].copy()
+        if futs.empty: return ""
+        futs['dt'] = pd.to_datetime(futs['EXPIRY_DATE'], errors='coerce')
+        current_fut = futs.sort_values('dt').iloc[0]
+        expiry_str = current_fut['EXPIRY_DATE']
+        try:
+            return "_" + pd.to_datetime(expiry_str).strftime("%d%b%y").upper()
+        except Exception:
+            return f"_{expiry_str}"
+
     def get_option_chain(self, spot_price: float, underlying: str = "NIFTY", range_strikes: int = 5, current_dt: Optional[datetime] = None, expiry_buffer_days: int = 1) -> List[Dict]:
         if self._fno_df is None: self._fetch_fno_master()
         

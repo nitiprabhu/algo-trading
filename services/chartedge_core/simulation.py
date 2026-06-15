@@ -444,7 +444,15 @@ class MarketSimulator:
             self.signals = self.signals[:80]
             # Use the NIFTY candle price (spot ≈ futures in simulation)
             fut_candle = next_open.model_copy()
-            fut_candle.instrument = "NIFTY_FUT"
+            
+            base_symbol = symbol.replace("_FUT", "")
+            expiry_suffix = ""
+            if getattr(self, "dm", None):
+                expiry_suffix = self.dm.get_futures_expiry_suffix(base_symbol)
+                
+            fut_candle.instrument = f"{base_symbol}_FUT{expiry_suffix}"
+            signal.instrument = f"{base_symbol}_FUT{expiry_suffix}"
+            
             await self.futures_trader.maybe_enter(signal, fut_candle)
             return
 
@@ -463,7 +471,8 @@ class MarketSimulator:
                 print(f"🎯 Creating Multi-Leg Trade for {symbol}: {multi_leg['strategy_name']}")
                 opt_signal = signal.model_copy()
                 opt_signal.id = uuid.uuid4()
-                opt_signal.instrument = f"{multi_leg['strategy_name']}:{symbol}"
+                expiry_suffix = multi_leg.get("expiry_suffix", "")
+                opt_signal.instrument = f"{multi_leg['strategy_name']}:{symbol}{expiry_suffix}"
                 opt_signal.strategy_name = multi_leg["strategy_name"]
                 
                 resolved_legs = []
@@ -595,6 +604,95 @@ class MarketSimulator:
         prices = {symbol: candles[-1].close for symbol, candles in self.candles.items() if candles}
         await self.trader.enable_kill_switch(prices, datetime.now(IST))
         return self.snapshot()
+
+    def reconstruct_recovered_option_legs(self) -> None:
+        """
+        Reconstruct option legs for any recovered active trades if their legs are empty.
+        Uses the trade's symbol format, underlying_entry_price, and DerivativeManager.
+        """
+        if not hasattr(self, "dm") or not self.dm:
+            return
+            
+        print("DEBUG: Reconstructing recovered option legs...")
+        for trade in list(self.trader.open_positions.values()):
+            if getattr(trade, "legs", []):
+                continue
+                
+            # If symbol matches multi-leg structure format, e.g. "IRON_CONDOR:NIFTY_23JUN26"
+            if ":" not in trade.instrument:
+                continue
+                
+            strategy_name, suffix = trade.instrument.split(":", 1)
+            underlying = "BANKNIFTY" if "BANKNIFTY" in suffix.upper() else "NIFTY"
+            
+            spot = trade.underlying_entry_price
+            if not spot or spot <= 0:
+                # Fallback to current spot if underlying entry price was not saved
+                if underlying in self.candles and self.candles[underlying]:
+                    spot = self.candles[underlying][-1].close
+                else:
+                    spot = 0
+                    
+            if spot <= 0:
+                print(f"⚠️ Cannot reconstruct legs for {trade.instrument}: spot is 0")
+                continue
+                
+            from services.chartedge_core.structures import select_structure
+            from services.chartedge_core.models import LegExecution
+            
+            opt_dir = "CE" if trade.direction == Direction.BUY else "PE"
+            
+            # Reconstruct select_structure using defaults
+            struct = select_structure(
+                regime="RANGE_BOUND_CHOP", # generic fallback
+                direction=opt_dir,
+                iv_rank=50.0,
+                spot=spot,
+                optimal_strategy=strategy_name,
+                strike_offset_config=int(self.config.risk.get("options_strike_offset", 0))
+            )
+            
+            if not struct.trade or not struct.legs:
+                print(f"⚠️ Failed to get structure definition for {strategy_name}")
+                continue
+                
+            current_dt = trade.entry_time
+            expiry_buffer = self.config.risk.get("options_expiry_buffer_days", 1)
+            
+            resolved_legs = []
+            for leg in struct.legs:
+                try:
+                    options = self.dm.get_atm_options(
+                        spot, 
+                        underlying, 
+                        current_dt=current_dt, 
+                        expiry_buffer_days=expiry_buffer, 
+                        strike_offset=leg.strike_offset
+                    )
+                    contract_data = options.get(leg.option_type)
+                    if not contract_data:
+                        continue
+                        
+                    token_id = contract_data["token"].split(":", 1)[1] if ":" in contract_data["token"] else contract_data["token"]
+                    
+                    resolved_legs.append(LegExecution(
+                        instrument=contract_data["token"],
+                        action=Direction.BUY if leg.action == "BUY" else Direction.SELL,
+                        ratio=leg.ratio,
+                        entry_price=contract_data.get("ltp", 0.0), # fallback, entry_price of leg isn't crucial for PnL of net premium
+                        strike=contract_data.get("strike", 0.0),
+                        option_type=leg.option_type
+                    ))
+                except Exception as ex:
+                    print(f"⚠️ Error resolving leg for {trade.instrument}: {ex}")
+                    
+            if len(resolved_legs) == len(struct.legs):
+                trade.legs = resolved_legs
+                print(f"✅ Reconstructed {len(resolved_legs)} legs for recovered trade {trade.instrument}:")
+                for leg in trade.legs:
+                    print(f"  - {leg.action.value} {leg.instrument} @ strike {leg.strike}")
+            else:
+                print(f"⚠️ Leg count mismatch for {trade.instrument} during reconstruction")
 
     def _append_equity(self, now: datetime) -> None:
         metrics = self.trader.metrics()

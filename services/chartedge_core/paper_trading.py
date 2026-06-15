@@ -76,9 +76,17 @@ class PaperTradingEngine:
         """Load open trades from the database to resume tracking after a restart."""
         records = get_open_trades()
         for r in records:
+            if "_FUT" in r.symbol or r.symbol.endswith("_FUT"):
+                continue
+            from zoneinfo import ZoneInfo
+            from datetime import timezone
+            IST = ZoneInfo("Asia/Kolkata")
             entry_time = r.entry_time
-            if hasattr(entry_time, "tzinfo") and entry_time.tzinfo is not None:
-                entry_time = entry_time.replace(tzinfo=None)
+            if entry_time is not None:
+                if entry_time.tzinfo is None:
+                    entry_time = entry_time.replace(tzinfo=timezone.utc).astimezone(IST).replace(tzinfo=None)
+                else:
+                    entry_time = entry_time.astimezone(IST).replace(tzinfo=None)
             trade = PaperTrade(
                 id=UUID(r.trade_id),
                 signal_id=UUID(r.signal_id),
@@ -151,7 +159,7 @@ class PaperTradingEngine:
 
             # Late-entry gate: need at least theta_timeout_mins before EOD
             theta = self.risk_config.get("theta_timeout_mins", 45)
-            from datetime import datetime as _dt, timedelta as _td
+            from datetime import datetime as _dt
             eod = _dt.combine(next_candle.time.date(), time(15, 0), tzinfo=next_candle.time.tzinfo)
             mins_to_eod = (eod - next_candle.time).total_seconds() / 60
             if mins_to_eod < theta:
@@ -447,8 +455,13 @@ class PaperTradingEngine:
                 f"🛡️ *Stop Loss:* `₹{trade.sl_price:.2f}`\n"
                 f"🎯 *Target 1:* `₹{trade.t1_price:.2f}`\n"
                 f"🎯 *Target 2:* `₹{trade.t2_price:.2f}`\n\n"
-                f"🧠 *Reason:* {signal.reasoning or 'No reason provided.'}"
             )
+            if trade.legs:
+                msg += "*⛓️ Leg Details:*\n"
+                for leg in trade.legs:
+                    msg += f"• *{leg.action.value}* `{leg.instrument}` @ `₹{leg.entry_price:.2f}` (Strike: {leg.strike})\n"
+                msg += "\n"
+            msg += f"🧠 *Reason:* {signal.reasoning or 'No reason provided.'}"
             asyncio.create_task(notifier.send_message(msg))
         training_logger.log_entry(trade, signal)
         return trade
@@ -456,6 +469,19 @@ class PaperTradingEngine:
     async def mark_to_market(self, candle: Candle, snapshot: IndicatorSnapshot | None = None, ltp_map: dict[str, float] | None = None) -> None:
         """Update all open positions. If ltp_map is provided (from live ticks), it takes priority."""
         for symbol, trade in list(self.open_positions.items()):
+            # --- GUARDRAIL: Prevent historical ticks from affecting live trades ---
+            t_candle = candle.time
+            t_entry = trade.entry_time
+            if t_candle.tzinfo is not None and t_entry.tzinfo is None:
+                t_candle = t_candle.replace(tzinfo=None)
+            elif t_candle.tzinfo is None and t_entry.tzinfo is not None:
+                t_entry = t_entry.replace(tzinfo=None)
+
+            if t_candle < t_entry:
+                trade.pnl = 0.0
+                trade.pnl_pct = 0.0
+                continue
+
             current_price = None
             
             # Multi-leg logic
@@ -464,6 +490,9 @@ class PaperTradingEngine:
                 all_legs_priced = True
                 for leg in trade.legs:
                     leg_price = ltp_map.get(leg.instrument) if ltp_map else None
+                    if leg_price is None and ltp_map:
+                        stripped_leg = leg.instrument.split(":", 1)[1] if ":" in leg.instrument else leg.instrument
+                        leg_price = ltp_map.get(stripped_leg)
                     if leg_price is None and self.is_backtesting and trade.underlying_entry_price:
                         # BS estimate
                         underlying_sym = "BANKNIFTY" if "BANKNIFTY" in trade.instrument.upper() else "NIFTY"
@@ -548,16 +577,7 @@ class PaperTradingEngine:
             else:
                 trade.last_db_update = datetime.now()
 
-            # --- GUARDRAIL: Prevent historical ticks from affecting live trades ---
-            t_candle = candle.time
-            t_entry = trade.entry_time
-            if t_candle.tzinfo is not None and t_entry.tzinfo is None:
-                t_candle = t_candle.replace(tzinfo=None)
-            elif t_candle.tzinfo is None and t_entry.tzinfo is not None:
-                t_entry = t_entry.replace(tzinfo=None)
 
-            if t_candle < t_entry:
-                continue
 
             # --- PER-TRADE EXIT LOGIC ---
             
@@ -841,8 +861,14 @@ class PaperTradingEngine:
                 f"📉 *Exit Price:* `₹{trade.exit_price:.2f}`\n"
                 f"🚪 *Exit Reason:* `{trade.exit_reason}`\n"
                 f"{emoji} *PnL:* `₹{trade.pnl:.2f}` ({trade.pnl_pct:.2f}%)\n\n"
-                f"💵 *Invested Amount:* `₹{trade.invested_amount:.2f}`"
             )
+            if trade.legs:
+                msg += "*⛓️ Leg Details:*\n"
+                for leg in trade.legs:
+                    exit_price_str = f"₹{leg.exit_price:.2f}" if leg.exit_price is not None else "N/A"
+                    msg += f"• *{leg.action.value}* `{leg.instrument}` (Entry: `₹{leg.entry_price:.2f}`, Exit: `{exit_price_str}`)\n"
+                msg += "\n"
+            msg += f"💵 *Invested Amount:* `₹{trade.invested_amount:.2f}`"
             asyncio.create_task(notifier.send_message(msg))
         training_logger.log_exit(trade)
 

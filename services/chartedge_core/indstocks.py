@@ -867,11 +867,21 @@ class IndstocksMarketRuntime(MarketSimulator):
         iv_rank = self._iv_rank_by_symbol.get(symbol, 50.0)
 
         optimal_strategy = "NAKED_BUY"
-        latest_indicators = getattr(self, "latest_indicators", {})
-        if latest_indicators and symbol in latest_indicators:
-            regime_info = latest_indicators[symbol].regime_info
-            if regime_info:
-                optimal_strategy = regime_info.get("optimal_strategy", "NAKED_BUY")
+        if strategy_name in ("T315", "5EMA"):
+            optimal_strategy = "DEBIT_SPREAD"
+        elif strategy_name and strategy_name.startswith("FUT_"):
+            return None
+        else:
+            latest_indicators = getattr(self, "latest_indicators", {})
+            if latest_indicators and symbol in latest_indicators:
+                regime_info = latest_indicators[symbol].regime_info
+                if regime_info:
+                    optimal_strategy = regime_info.get("optimal_strategy", "NAKED_BUY")
+
+        # Respect allow_margin configuration
+        allow_margin = self.config.risk.get("allow_margin", False)
+        if not allow_margin and optimal_strategy in ("IRON_CONDOR", "CREDIT_SPREAD", "SHORT_STRANGLE"):
+            optimal_strategy = "DEBIT_SPREAD"
 
         from services.chartedge_core.structures import select_structure
         opt_dir = "CE" if direction == "BUY" else "PE"

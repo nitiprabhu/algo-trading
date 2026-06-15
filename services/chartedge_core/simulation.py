@@ -431,7 +431,7 @@ class MarketSimulator:
         # FUTURES ROUTING: NIFTY_FUT signals go directly to FuturesTradingEngine
         if signal.instrument == "NIFTY_FUT":
             strategy_name = getattr(signal, "strategy_name", None) or ""
-            if strategy_name.startswith("FUT_") and self.config.risk.get("trade_only_trending", True):
+            if strategy_name.startswith("FUT_") and self.config.risk.get("trade_only_trending", True) and not self.is_backtesting:
                 regime = getattr(self, "_regime_by_symbol", {}).get("NIFTY", "")
                 if regime in ("RANGE_BOUND_CHOP", "MEAN_REVERTING"):
                     print(

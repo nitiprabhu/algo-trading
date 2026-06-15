@@ -180,18 +180,24 @@ class FuturesTradingEngine:
         self, signal: Signal, direction: Direction, entry_price: float
     ) -> tuple[float, float, float]:
         """Use strategy SL/T1/T2 when valid; otherwise fall back to fixed point offsets."""
-        use_signal = signal.strategy_name in ("FUT_ORB", "FUT_ORB_SESSION", "FUT_MID", "FUT_CLOSE") or (
+        use_signal = signal.strategy_name in ("FUT_ORB", "FUT_ORB_SESSION", "FUT_MID", "FUT_MIDDAY", "FUT_CLOSE") or (
             signal.strategy_name or ""
         ).startswith("FUT_")
 
         if use_signal and signal.stop_loss:
             sl = round(signal.stop_loss, 2)
-            t1 = round(signal.target_1, 2)
-            t2 = round(signal.target_2, 2)
-            if direction == Direction.BUY and sl < entry_price < t1 <= t2:
-                return sl, t1, t2
-            if direction == Direction.SELL and sl > entry_price > t1 >= t2:
-                return sl, t1, t2
+            # Enforce sanity cap on stop-loss distance (between 30 and 120 points)
+            sl_distance = abs(entry_price - sl)
+            if sl_distance < 30.0:
+                sl_distance = 30.0
+                sl = round(entry_price - sl_distance if direction == Direction.BUY else entry_price + sl_distance, 2)
+            elif sl_distance > 120.0:
+                sl_distance = 120.0
+                sl = round(entry_price - sl_distance if direction == Direction.BUY else entry_price + sl_distance, 2)
+
+            t1 = round(entry_price + sl_distance * 1.5 if direction == Direction.BUY else entry_price - sl_distance * 1.5, 2)
+            t2 = round(entry_price + sl_distance * 3.0 if direction == Direction.BUY else entry_price - sl_distance * 3.0, 2)
+            return sl, t1, t2
 
         if direction == Direction.BUY:
             return (

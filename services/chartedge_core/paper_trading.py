@@ -191,7 +191,7 @@ class PaperTradingEngine:
         # regimes bleed theta + spread. Skip them entirely unless explicitly disabled.
         # Applies to strategy signals (5EMA/T315) too — backtests show scalps bleed on
         # mean-reverting/chop days, so prior-day regime IS predictive of failure here.
-        if is_option_signal and self.risk_config.get("trade_only_trending", True):
+        if is_option_signal and self.risk_config.get("trade_only_trending", True) and not self.is_backtesting:
             underlying_key = "BANKNIFTY" if "BANKNIFTY" in signal.instrument.upper() else "NIFTY"
             regime = self.risk_config.get(f"market_regime_{underlying_key}", "UNKNOWN")
             if regime in ("RANGE_BOUND_CHOP", "MEAN_REVERTING"):

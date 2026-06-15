@@ -246,6 +246,8 @@ class MarketSimulator:
             
             # F&O specific strategy check (1m resolution)
             vix_val = self.candles.get("INDIAVIX")[-1].close if self.candles.get("INDIAVIX") else 0.0
+            # Push live VIX into risk_config so paper_trading VIX gate can read it
+            self.trader.risk_config["current_vix"] = vix_val
             fo_signal = await self.signal_engine.get_fo_signal(candle, list(self.candles[symbol]), vix_val, snapshot)
             if fo_signal:
                 # Intraday ADX trend gate for strategy scalps (5EMA/T315).

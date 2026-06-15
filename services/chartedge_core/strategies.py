@@ -518,3 +518,149 @@ class NiftyFuturesORB(OptionStrategy):
                 "sl": max(s["ema21"], vwap) if vwap else s["ema21"],
             }
         return None
+
+
+class IronCondorStrategy(OptionStrategy):
+    """
+    Regime-Gated Weekly Iron Condor (SELL premium).
+
+    Gate (decided at session start each day — NO lookahead):
+      • VIX ≤ vix_gate (default 14.0) — calm market, premiums fairly priced
+      • |5-day NIFTY % move| ≤ trend_gate (default 3.0%) — range-bound
+
+    Structure (once per week cycle, NIFTY only):
+      • Short PE  ← spot at ~short_delta below
+      • Long  PE  ← spot at ~wing_delta further below  (defined risk wing)
+      • Short CE  ← spot at ~short_delta above
+      • Long  CE  ← spot at ~wing_delta further above  (defined risk wing)
+      Net credit collected. Max loss = wider wing − credit.
+
+    Entry: 09:45–10:00 (after ORB range is set, before big moves start).
+    Exit:  Profit-take at 55% of credit captured  OR  stop at 2.2× credit  OR  EOD.
+
+    Emits a signal dict with:
+      strategy   = "IRON_CONDOR"
+      direction  = "SELL"
+      option_type = "CONDOR"
+      strikes    = (short_pe, long_pe, short_ce, long_ce) — point strikes
+      reason     = description string
+    """
+    SUPPORTED_INSTRUMENTS = ("NIFTY",)
+    ENTRY_START = time(9, 45)
+    ENTRY_END   = time(10, 0)
+
+    def __init__(
+        self,
+        vix_gate: float = 14.0,
+        trend_gate_pct: float = 3.0,
+        short_delta: float = 0.20,
+        wing_delta:  float = 0.10,
+        lookback_days: int = 5,
+    ) -> None:
+        self.vix_gate       = vix_gate
+        self.trend_gate_pct = trend_gate_pct
+        self.short_delta    = short_delta
+        self.wing_delta     = wing_delta
+        self.lookback_days  = lookback_days
+        self._state: dict[str, dict] = {}
+
+    def _get_state(self, symbol: str) -> dict:
+        if symbol not in self._state:
+            self._state[symbol] = {
+                "current_day":      None,
+                "traded_this_week": False,
+                "last_week":        None,
+                "daily_closes":     [],  # rolling recent closes for trend gate
+            }
+        return self._state[symbol]
+
+    def update(self, candle: Candle) -> None:
+        if candle.instrument not in self.SUPPORTED_INSTRUMENTS:
+            return
+        s = self._get_state(candle.instrument)
+        current_date = candle.time.date()
+        if s["current_day"] != current_date:
+            s["current_day"] = current_date
+            # Store daily close of previous day (EOD close ~ last candle of day)
+        # Track end-of-day close
+        if candle.time.time() >= time(15, 25):
+            # Only store once per day
+            if not s["daily_closes"] or s["daily_closes"][-1][0] != current_date:
+                s["daily_closes"].append((current_date, candle.close))
+                if len(s["daily_closes"]) > self.lookback_days + 2:
+                    s["daily_closes"].pop(0)
+
+        # Reset weekly flag on Monday
+        week_num = current_date.isocalendar()[1]
+        if s["last_week"] != week_num:
+            s["last_week"] = week_num
+            s["traded_this_week"] = False
+
+    def _recent_trend_pct(self, symbol: str) -> float:
+        """Absolute % move over the last lookback_days daily closes."""
+        s = self._get_state(symbol)
+        closes = s["daily_closes"]
+        if len(closes) < 2:
+            return 0.0
+        lookback = min(self.lookback_days, len(closes) - 1)
+        old_close = closes[-lookback - 1][1] if lookback < len(closes) else closes[0][1]
+        new_close = closes[-1][1]
+        return abs((new_close - old_close) / old_close * 100.0) if old_close else 0.0
+
+    def get_signal(
+        self,
+        candle: Candle,
+        india_vix: float = 0.0,
+        spot: float = 0.0,
+    ) -> Optional[Dict]:
+        if candle.instrument not in self.SUPPORTED_INSTRUMENTS:
+            return None
+
+        s = self._get_state(candle.instrument)
+        if s["traded_this_week"]:
+            return None
+
+        t = candle.time.time()
+        if not (self.ENTRY_START <= t <= self.ENTRY_END):
+            return None
+
+        # ── Regime Gate ──────────────────────────────────────────────────────
+        if india_vix <= 0 or india_vix > self.vix_gate:
+            return None   # VIX too high — don't sell premium
+
+        trend_pct = self._recent_trend_pct(candle.instrument)
+        if trend_pct > self.trend_gate_pct:
+            return None   # Market trending — condor wings at risk
+
+        # ── Strike Selection (simple ATM offset, no BS needed at signal time) ──
+        # Use integer strike offsets. Actual BS pricing happens in paper_trading
+        # when the legs are resolved via option chain / BS model.
+        step = 50  # NIFTY strike step
+        spot_price = spot if spot > 0 else candle.close
+        atm = round(spot_price / step) * step
+
+        # Approximate: ~0.20 delta ≈ 2–3 strikes OTM for NIFTY (at VIX 12–14)
+        # Use a fixed 3-strike OTM for the short, 5-strike for the wing.
+        short_strikes_otm = 3
+        wing_strikes_otm  = 5
+        short_pe = atm - short_strikes_otm * step
+        long_pe  = atm - wing_strikes_otm  * step
+        short_ce = atm + short_strikes_otm * step
+        long_ce  = atm + wing_strikes_otm  * step
+
+        s["traded_this_week"] = True
+        print(
+            f"🦅 [IRON CONDOR] NIFTY @ {candle.time} | VIX={india_vix:.1f} | trend={trend_pct:.1f}% | "
+            f"strikes: PE {long_pe}/{short_pe} | CE {short_ce}/{long_ce}"
+        )
+        return {
+            "strategy":    "IRON_CONDOR",
+            "direction":   "SELL",
+            "option_type": "CONDOR",
+            "strikes":     (short_pe, long_pe, short_ce, long_ce),
+            "reason": (
+                f"NIFTY Iron Condor | VIX={india_vix:.1f} (≤{self.vix_gate}) | "
+                f"trend={trend_pct:.1f}% (≤{self.trend_gate_pct}%) | "
+                f"PE {long_pe}/{short_pe} | CE {short_ce}/{long_ce}"
+            ),
+        }

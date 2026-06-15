@@ -11,7 +11,7 @@ import httpx
 
 from services.chartedge_core.confluence import consideration
 from services.chartedge_core.models import Candle, Direction, EntryZone, IndicatorSnapshot, Signal
-from services.chartedge_core.strategies import EagleNiftyT315, FiveEMAScalping, NiftyFuturesORB
+from services.chartedge_core.strategies import EagleNiftyT315, FiveEMAScalping, NiftyFuturesORB, IronCondorStrategy
 
 
 class AIProvider(ABC):
@@ -253,6 +253,7 @@ class SignalEngine:
                 "t315": EagleNiftyT315(),
                 "ema5": FiveEMAScalping(),
                 "fut_orb": NiftyFuturesORB(),
+                "iron_condor": IronCondorStrategy(),   # SELL premium in VIX≤14 range markets
             }
         
         strategies = self.strategies[symbol]
@@ -264,6 +265,7 @@ class SignalEngine:
         strategies["t315"].update(candle)
         strategies["ema5"].update(candle, candles)
         strategies["fut_orb"].update(candle)
+        strategies["iron_condor"].update(candle)
 
         # 3. Check for triggers (T315 uses updated state)
         t315_trigger = strategies["t315"].get_signal(candle, india_vix)
@@ -287,12 +289,25 @@ class SignalEngine:
                 # Override instrument to NIFTY_FUT so it routes to FuturesTradingEngine
                 fut_orb_trigger["instrument_override"] = "NIFTY_FUT"
 
-        trigger = t315_trigger or ema5_trigger or fut_orb_trigger
-        
+        # 4. Iron Condor — sell premium when VIX≤14 + range-bound (NIFTY only)
+        condor_trigger = None
+        if symbol == "NIFTY":
+            condor_trigger = strategies["iron_condor"].get_signal(
+                candle, india_vix, spot=candle.close
+            )
+
+        trigger = t315_trigger or ema5_trigger or fut_orb_trigger or condor_trigger
+
         if not trigger:
             # Periodic health check print (every 5 mins per instrument)
             if candle.time.minute % 5 == 0:
-                print(f"💤 [Strategy] {symbol} @ {candle.time.strftime('%H:%M')} - No Trigger (T315: {'YES' if t315_trigger else 'NO'}, 5EMA: {'YES' if ema5_trigger else 'NO'}, FUT_ORB: {'YES' if fut_orb_trigger else 'NO'})")
+                print(
+                    f"💤 [Strategy] {symbol} @ {candle.time.strftime('%H:%M')} - "
+                    f"No Trigger (T315: {'YES' if t315_trigger else 'NO'}, "
+                    f"5EMA: {'YES' if ema5_trigger else 'NO'}, "
+                    f"FUT_ORB: {'YES' if fut_orb_trigger else 'NO'}, "
+                    f"CONDOR: {'YES' if condor_trigger else 'NO'})"
+                )
             return None
 
         # Cooldown check to avoid spamming AI reviews on consecutive candles of the same setup
@@ -330,8 +345,8 @@ class SignalEngine:
         """Convert a strategy trigger dictionary to a Signal object."""
         entry_low  = candle.close * 0.9995
         entry_high = candle.close * 1.0005
-        sl  = trigger["sl"]
-        risk = abs(candle.close - sl)
+        sl  = trigger.get("sl", candle.close)
+        risk = abs(candle.close - sl) if sl != candle.close else 1.0
 
         opt_type = trigger.get("option_type")
         raw_dir  = trigger.get("direction", "BUY")

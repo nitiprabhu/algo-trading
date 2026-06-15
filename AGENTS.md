@@ -122,3 +122,25 @@ Three modes, selected at runtime/backtest time:
 ## Imported Claude Cowork project instructions
 
 this is my intraday trading app. it does currently paper trading on nse , takes buy and sell signal and tries to make trade profitable. we have to run this server everyday and montior and makes imprveoements to improde win %
+
+## Historical Backtest Performance (June 2025 - June 2026)
+
+The standard configuration has been backtested over a 13-month period with the following monthly results:
+
+| Month | Combined PnL | Options PnL | Futures PnL | Total Trades | Win Rate | Primary Strategy |
+| :--- | :--- | :--- | :--- | :---: | :---: | :--- |
+| **June 2025** | **₹+25,192.28** | ₹+7,460.25 | ₹+17,732.03 | 34 | 52.9% | `NAKED_BUY` |
+| **July 2025** | **₹-17,598.99** | ₹-4,596.45 | ₹-13,002.54 | 80 | 23.8% | `NAKED_BUY` |
+| **August 2025** | **₹-8,626.24** | ₹+780.45 | ₹-9,406.69 | 34 | 32.4% | `NAKED_BUY` |
+| **September 2025** | **₹+2,541.32** | ₹+1,597.80 | ₹+943.52 | 38 | 47.4% | `NAKED_BUY` |
+| **October 2025** | **₹+13,648.77** | ₹+6,397.50 | ₹+7,251.27 | 62 | 45.2% | `NAKED_BUY` |
+| **November 2025** | **₹+5,032.50** | ₹+725.55 | ₹+4,306.95 | 52 | 44.2% | `NAKED_BUY` |
+| **December 2025** | **₹+13,783.44** | ₹+4,381.50 | ₹+9,401.94 | 65 | 46.2% | `NAKED_BUY` |
+| **January 2026** | **₹-21,246.14** | ₹+198.00 | ₹-21,444.14 | 76 | 27.6% | `NAKED_BUY` |
+| **February 2026** | **₹+14,807.81** | ₹+4,008.90 | ₹+10,798.91 | 31 | 45.2% | `NAKED_BUY` |
+| **March 2026** | **₹+29,503.62** | ₹-1,062.90 | ₹+30,566.52 | 56 | 33.9% | Multi-Strategy |
+| **April 2026** | **₹+73,098.37** | ₹+1,868.10 | ₹+71,230.27 | 23 | 82.6% | Multi-Strategy |
+| **May 2026** | **₹-18,008.78** | ₹-1,984.05 | ₹-16,024.73 | 33 | 33.3% | Multi-Strategy |
+| **June 2026 (1-15)** | **₹+14,839.46** | ₹-1,730.70 | ₹+16,570.16 | 48 | 25.0% | Multi-Strategy |
+| **Grand Total** | **₹+126,967.42** | **₹+18,043.95** | **₹+108,923.47** | **632** | **38.5%** | — |
+

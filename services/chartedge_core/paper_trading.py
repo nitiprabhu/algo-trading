@@ -182,6 +182,31 @@ class PaperTradingEngine:
             print(f"⛔ [Options Buffer] {signal.instrument}: confidence {signal.confidence} below options floor {self.risk_config['confidence_floor'] + options_buffer}")
             return None
 
+        # ── VIX Gate for option BUYING ────────────────────────────────────────────
+        # Option buying (debit) only has positive expectancy in trending, moderate-VIX markets.
+        # High VIX (>= options_vix_max) → inflated premiums + mean-reversion risk = poor R:R.
+        # Low ADX (< adx_min_trend) + elevated VIX → choppy = theta bleed.
+        # Multi-leg signals (DEBIT_SPREAD, NAKED_BUY) and strategy signals both respect this gate.
+        if is_option_signal:
+            current_vix = self.risk_config.get("current_vix", 0.0)
+            vix_max_opts = self.risk_config.get("options_vix_max", 18.0)
+            vix_panic_cutoff = self.risk_config.get("options_vix_panic", 22.0)
+            if current_vix > 0:
+                if current_vix >= vix_panic_cutoff:
+                    # VIX >= 22: extreme fear, spreads widen dramatically, skip all option buys
+                    print(f"⛔ [VIX Panic] {signal.instrument}: VIX={current_vix:.1f} >= {vix_panic_cutoff} — option buy blocked")
+                    return None
+                if current_vix >= vix_max_opts:
+                    # VIX 18–22: only allow if ADX confirms strong intraday trend
+                    snap = getattr(signal, "indicator_snapshot", None)
+                    inds = snap.indicators if snap is not None else {}
+                    adx_iv = inds.get("adx")
+                    adx_val = adx_iv.value if (adx_iv is not None and isinstance(adx_iv.value, (int, float))) else 0.0
+                    adx_high_vix_min = self.risk_config.get("adx_min_high_vix", 32.0)
+                    if adx_val < adx_high_vix_min:
+                        print(f"⛔ [VIX+ADX Gate] {signal.instrument}: VIX={current_vix:.1f} >= {vix_max_opts}, ADX={adx_val:.1f} < {adx_high_vix_min} — option buy skipped (no trend in high-VIX)")
+                        return None
+
         # Options bias gate: regime agent may set a directional bias for the day.
         # Strategy signals (T315, 5EMA) bypass this — they are reactive intraday breakouts
         # that don't depend on prior-day direction. Bias only filters confluence-based signals.

@@ -132,6 +132,13 @@ risk:
   options_expiry_buffer_days: 1
   options_strike_offset: 1  # 1 = ITM (delta ~0.65); 0 = ATM; -1 = OTM
   options_min_premium: 80.0 # Filter out cheap options where spreads dominate edge
+  # ── VIX gate for option BUYING ───────────────────────────────────────────────
+  # options_vix_max:   up to this VIX, buy freely (when ADX confirms trend)
+  # options_vix_panic: above this VIX, block all option buys
+  # adx_min_high_vix:  when VIX is between vix_max and vix_panic, require this ADX
+  options_vix_max: 18.0     # moderate VIX zone — allow buys only with strong ADX
+  options_vix_panic: 22.0   # extreme VIX — block all option buys unconditionally
+  adx_min_high_vix: 32.0    # ADX floor for buys when VIX is 18–22
 
 futures_risk:
   NIFTY_FUT:
@@ -187,3 +194,14 @@ options_structure:
   prefer_itm: true             # buy ITM (strike_offset=1) on trend days
   itm_delta_target: 0.65       # approximate delta we aim for on ITM buys
   # short-premium structures (strangle, condor) are disabled until margin enabled
+
+# Iron Condor SELL engine — activates only when VIX≤14 and market is range-bound
+iron_condor:
+  enabled: true
+  vix_gate: 14.0              # sell premium only when VIX at or below this
+  trend_gate_pct: 3.0         # skip if |5-day NIFTY move| exceeds this %
+  short_delta: 0.20           # target delta for short strikes (~3 OTM at VIX 12-14)
+  wing_delta: 0.10            # long wing delta (protection)
+  profit_take_pct: 0.55       # close when condor buyback ≤ (1-PT)*credit
+  stop_mult: 2.2              # close when condor worth > stop_mult * credit
+  lookback_days: 5            # days of price history for trend gate

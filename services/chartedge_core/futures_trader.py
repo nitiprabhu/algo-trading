@@ -363,14 +363,26 @@ class FuturesTradingEngine:
                     trade.sl_price = trade.entry_price
                     print(f"🎯 [Futures] T1 hit — SL moved to breakeven {trade.entry_price}")
 
-        # Daily circuit breaker — same -2% cap as options engine
-        m = self.metrics()
-        total_capital = self.risk_config.get("total_capital", 500000.0)
-        dd_pct = round(((m["futures_realized_pnl"] + m["futures_open_pnl"]) / total_capital) * 100, 2)
-        dd_limit = self.risk_config.get("daily_drawdown_pause_pct", 2.0)
+        # Daily circuit breaker — check combined daily drawdown pause
+        total_capital = self.risk_config.get("total_capital", 200000.0)
+        dd_limit = self.risk_config.get("daily_drawdown_pause_pct", 2.5)
+
+        current_date = candle.time.date()
+        if hasattr(self, "simulator") and self.simulator:
+            dd_pct = self.simulator.get_combined_daily_drawdown_pct(current_date)
+        else:
+            # Fallback to local futures daily drawdown if simulator is not set
+            fut_realized = sum(t.pnl for t in self.closed_trades if t.exit_time and t.exit_time.date() == current_date)
+            fut_open = sum(t.pnl for t in self.open_positions.values())
+            dd_pct = round(((fut_realized + fut_open) / total_capital) * 100, 2)
+
         if dd_pct <= -abs(dd_limit):
             print(f"🛑 [Futures] CIRCUIT BREAKER: daily drawdown {dd_pct}% (limit: -{dd_limit}%)")
-            await self.force_close_all({instrument: candle.close for instrument in self.open_positions}, candle.time, "KILL_SWITCH")
+            if hasattr(self, "simulator") and self.simulator:
+                await self.simulator.trigger_global_kill_switch(candle.time, candle=candle)
+            else:
+                self.kill_switch = True
+                await self.force_close_all({instrument: candle.close for instrument in self.open_positions}, candle.time, "KILL_SWITCH")
 
     # ─────────────────────────── Close helper ─────────────────────────────────
 

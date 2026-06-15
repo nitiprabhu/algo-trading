@@ -750,24 +750,33 @@ class PaperTradingEngine:
                     if trade.sl_price > trade.entry_price:
                         trade.sl_price = trade.entry_price
 
-        # 1. Daily Circuit Breaker: stop trading at -2% drawdown (₹2,000 on 1L capital).
-        # -5% was too loose — allowed ₹5,000+ single-day wipeouts before stopping.
-        m = self.metrics()
-        total_capital = self.risk_config.get("total_capital", 100000.0)
-        current_drawdown_pct = round(((m["realized_pnl"] + m["open_pnl"]) / total_capital) * 100, 2)
+        # 1. Daily Circuit Breaker: check combined daily drawdown pause
+        total_capital = self.risk_config.get("total_capital", 200000.0)
+        dd_limit = self.risk_config.get("daily_drawdown_pause_pct", 2.5)
 
-        if current_drawdown_pct <= -2.0:
-            print(f"🛑 CIRCUIT BREAKER: Daily drawdown reached {current_drawdown_pct}% (Limit: -2.0%)")
-            # Use ltp_map for current prices; fall back to entry_price if real price unavailable
-            prices = {}
-            for sym, t in self.open_positions.items():
-                if ltp_map and sym in ltp_map:
-                    prices[sym] = ltp_map[sym]
-                elif sym == candle.instrument:
-                    prices[sym] = candle.close
-                else:
-                    prices[sym] = t.entry_price
-            await self.enable_kill_switch(prices, candle.time)
+        current_date = candle.time.date()
+        if hasattr(self, "simulator") and self.simulator:
+            current_drawdown_pct = self.simulator.get_combined_daily_drawdown_pct(current_date)
+        else:
+            # Fallback to local options daily drawdown if simulator is not set
+            opt_realized = sum(t.pnl for t in self.closed_trades if t.exit_time and t.exit_time.date() == current_date)
+            opt_open = sum(t.pnl for t in self.open_positions.values())
+            current_drawdown_pct = round(((opt_realized + opt_open) / total_capital) * 100, 2)
+
+        if current_drawdown_pct <= -abs(dd_limit):
+            print(f"🛑 CIRCUIT BREAKER: Combined daily drawdown reached {current_drawdown_pct}% (Limit: -{dd_limit}%)")
+            if hasattr(self, "simulator") and self.simulator:
+                await self.simulator.trigger_global_kill_switch(candle.time, ltp_map=ltp_map, candle=candle)
+            else:
+                prices = {}
+                for sym, t in self.open_positions.items():
+                    if ltp_map and sym in ltp_map:
+                        prices[sym] = ltp_map[sym]
+                    elif sym == candle.instrument:
+                        prices[sym] = candle.close
+                    else:
+                        prices[sym] = t.entry_price
+                await self.enable_kill_switch(prices, candle.time)
             return
 
 

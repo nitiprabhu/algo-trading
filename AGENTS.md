@@ -1,5 +1,8 @@
 # AGENTS.md
 
+> [!IMPORTANT]
+> **Before proposing or implementing any strategy, risk rule, or parameter changes, you MUST consult [BENCHMARK.md](file:///Users/nithish-prabhu/Downloads/intra-day/BENCHMARK.md).** Any new algorithm must beat the baseline benchmark of **₹+69,929.05** combined PnL across April-June 2026 without violating the ₹2L capital limits and the 2.5% daily drawdown rule.
+
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Commands

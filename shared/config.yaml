@@ -125,7 +125,7 @@ risk:
   options_min_trend_sep_pct: 0.10
   strategy_adx_gate: true       # apply intraday ADX trend gate to 5EMA/T315 strategy scalps
   adx_min_trend: 30.0           # min ADX for an entry — above 30 indicates strong trend, filters chop
-  daily_drawdown_pause_pct: 5.0
+  daily_drawdown_pause_pct: 2.5
   stale_feed_seconds: 60
   price_deviation_guard_pct: 5.0
   timeframe_mins: 15

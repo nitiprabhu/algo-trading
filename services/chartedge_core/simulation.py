@@ -4,7 +4,7 @@ import asyncio
 import math
 import random
 from collections import defaultdict, deque
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date
 from zoneinfo import ZoneInfo
 
 import uuid
@@ -774,3 +774,43 @@ class MarketSimulator:
             else:
                 result[frame] = "UP" if values[-1].close > values[0].close else "DOWN"
         return result
+
+    def get_combined_daily_drawdown_pct(self, current_date: date) -> float:
+        total_capital = self.config.risk.get("total_capital", 200000.0)
+        
+        # Options daily PnL
+        opt_realized = sum(t.pnl for t in self.trader.closed_trades if t.exit_time and t.exit_time.date() == current_date)
+        opt_open = sum(t.pnl for t in self.trader.open_positions.values())
+        
+        # Futures daily PnL
+        fut_realized = sum(t.pnl for t in self.futures_trader.closed_trades if t.exit_time and t.exit_time.date() == current_date)
+        fut_open = sum(t.pnl for t in self.futures_trader.open_positions.values())
+        
+        combined_pnl = opt_realized + opt_open + fut_realized + fut_open
+        dd_pct = (combined_pnl / total_capital) * 100
+        return round(dd_pct, 2)
+
+    async def trigger_global_kill_switch(self, now: datetime, ltp_map: dict[str, float] = None, candle: Candle = None) -> None:
+        print(f"🛑 [MarketSimulator] GLOBAL KILL SWITCH TRIGGERED at {now}!")
+        
+        # 1. Close options positions
+        prices = {}
+        for sym, t in self.trader.open_positions.items():
+            if ltp_map and sym in ltp_map:
+                prices[sym] = ltp_map[sym]
+            elif candle and sym == candle.instrument:
+                prices[sym] = candle.close
+            else:
+                prices[sym] = t.entry_price
+        await self.trader.enable_kill_switch(prices, now)
+        
+        # 2. Close futures positions
+        fut_prices = {}
+        for sym, t in self.futures_trader.open_positions.items():
+            if candle and sym.startswith(candle.instrument):
+                fut_prices[sym] = candle.close
+            else:
+                fut_prices[sym] = t.entry_price
+        
+        self.futures_trader.kill_switch = True
+        await self.futures_trader.force_close_all(fut_prices, now, "KILL_SWITCH")

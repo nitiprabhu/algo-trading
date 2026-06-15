@@ -234,6 +234,35 @@ class FuturesTradingEngine:
         entry_price = round(candle.open * (1.0005 if direction == Direction.BUY else 0.9995), 2)
         sl_price, t1_price, t2_price = self._resolve_levels(signal, direction, entry_price)
 
+        total_capital = self.risk_config.get("total_capital", 200000.0)
+        margin_pct = 0.12 if "BANKNIFTY" in signal.instrument.upper() else 0.11
+        required_margin = entry_price * (self.lot_size * self.max_lots) * margin_pct
+
+        # 1. Mutual Exclusion / Focus Rule Check
+        has_active_options = False
+        used_options_outlay = 0.0
+        if hasattr(self, "simulator") and self.simulator:
+            active_options = self.simulator.trader.open_positions
+            if len(active_options) > 0:
+                has_active_options = True
+            used_options_outlay = sum(p.invested_amount for p in active_options.values())
+
+        if has_active_options:
+            print(f"⛔ [Futures Margin Gate] {signal.instrument}: Blocked futures entry because there is an active Options position (Mutual Exclusion)")
+            return None
+
+        # 2. Free Margin Check
+        used_futures_margin = 0.0
+        for fut_trade in self.open_positions.values():
+            m_pct = 0.12 if "BANKNIFTY" in fut_trade.instrument.upper() else 0.11
+            used_futures_margin += fut_trade.entry_price * fut_trade.quantity * m_pct
+
+        free_margin = total_capital - used_options_outlay - used_futures_margin
+
+        if required_margin > free_margin:
+            print(f"⛔ [Futures Margin Gate] {signal.instrument}: Required margin {required_margin:.2f} exceeds free margin {free_margin:.2f} (Total Cap: {total_capital})")
+            return None
+
         entry_costs = (
             futures_entry_cost(entry_price, self.lot_size * self.max_lots, direction.value).total
             if self.apply_costs else 0.0

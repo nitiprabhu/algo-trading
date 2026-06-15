@@ -105,8 +105,8 @@ ai:
   max_tokens: 500
 
 risk:
-  total_capital: 500000
-  notional_per_trade: 100000
+  total_capital: 200000
+  notional_per_trade: 200000
   max_open_positions: 2
   max_signals_per_instrument_per_hour: 3
   confidence_floor: 60

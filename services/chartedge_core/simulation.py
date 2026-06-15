@@ -59,6 +59,8 @@ class MarketSimulator:
             is_backtesting=skip_db_load,  # skip_db_load == True during backtests
             risk_config=config.risk,
         )
+        self.trader.simulator = self
+        self.futures_trader.simulator = self
 
     async def seed(self) -> None:
         now = datetime.now(IST).replace(second=0, microsecond=0) - timedelta(minutes=180)

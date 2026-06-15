@@ -305,8 +305,8 @@ class PaperTradingEngine:
             lot_size = 15
             max_lots_cap = 4   # max 60 qty — premium ~₹18K at 300/lot; preserves capital
         elif "NIFTY" in inst_upper:
-            lot_size = 25
-            max_lots_cap = 3   # max 75 qty — premium ~₹12K at 160/lot
+            lot_size = 75
+            max_lots_cap = 1   # max 75 qty — premium ~₹12K at 160/lot (preserves 10% outlay cap)
         else:
             lot_size = 1
             max_lots_cap = 100
@@ -330,13 +330,32 @@ class PaperTradingEngine:
             lots = max(1, int(lots * conviction_mult))
         print(f"DEBUG: Trade Calculation for {signal.instrument}: risk_per_share={risk_per_share:.2f}, lots_by_risk={lots_by_risk}, lots_by_outlay={lots_by_outlay}, conviction={conviction_mult}(conf={conf}), final_lots={lots}, lot_size={lot_size}")
         
-        # Ensure minimum quantity of 50 for Nifty as requested (if funds allow)
-        if "NIFTY" in signal.instrument and lots < 2 and max_outlay >= (entry_price * 50):
-             lots = 2
-             
         quantity = lots * lot_size
         invested_amount = round(entry_price * quantity, 2)
         
+        # 1. Mutual Exclusion / Focus Rule Check
+        has_active_futures = False
+        used_futures_margin = 0.0
+        if hasattr(self, "simulator") and self.simulator:
+            active_fut = self.simulator.futures_trader.open_positions
+            if len(active_fut) > 0:
+                has_active_futures = True
+            for fut_trade in active_fut.values():
+                margin_pct = 0.12 if "BANKNIFTY" in fut_trade.instrument.upper() else 0.11
+                used_futures_margin += fut_trade.entry_price * fut_trade.quantity * margin_pct
+                
+        if has_active_futures:
+            print(f"⛔ [Margin Gate] {signal.instrument}: Blocked options entry because there is an active Futures position (Mutual Exclusion)")
+            return None
+
+        # 2. Free Margin Check
+        used_options_outlay = sum(p.invested_amount for p in self.open_positions.values())
+        free_margin = total_equity - used_options_outlay - used_futures_margin
+        
+        if invested_amount > free_margin:
+            print(f"⛔ [Margin Gate] {signal.instrument}: Required premium outlay {invested_amount} exceeds free margin {free_margin:.2f} (Total Cap: {total_equity})")
+            return None
+            
         # Final safety check against hard capital limit
         if invested_amount > total_equity * 0.3: # Max 30% capital in one trade (even if risk is low)
             print(f"⚠️ Trade rejected: Invested amount ({invested_amount}) exceeds 30% capital buffer")

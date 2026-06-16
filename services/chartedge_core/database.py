@@ -124,7 +124,7 @@ class TradeRecord(SQLModel, table=True):
 
 def persist_trade_entry(trade) -> Optional[TradeRecord]:
     """Save a new trade entry to the database."""
-    if not DATABASE_URL or "sqlite" in DATABASE_URL:
+    if not DATABASE_URL:
         return None
     try:
         with Session(engine) as session:
@@ -157,7 +157,7 @@ def persist_trade_entry(trade) -> Optional[TradeRecord]:
 
 def update_trade_mtm(trade_id: str, pnl: float, pnl_pct: float, sl_price: float, t1_hit: bool, highest_pnl_pct: float):
     """Update MTM details for an open trade."""
-    if not DATABASE_URL or "sqlite" in DATABASE_URL:
+    if not DATABASE_URL:
         return
     try:
         with Session(engine) as session:
@@ -177,7 +177,7 @@ def update_trade_mtm(trade_id: str, pnl: float, pnl_pct: float, sl_price: float,
 
 def persist_trade_exit(trade) -> Optional[TradeRecord]:
     """Update a trade record with exit details."""
-    if not DATABASE_URL or "sqlite" in DATABASE_URL:
+    if not DATABASE_URL:
         return None
     try:
         with Session(engine) as session:
@@ -208,7 +208,7 @@ def persist_trade_exit(trade) -> Optional[TradeRecord]:
 
 def get_open_trades() -> List[TradeRecord]:
     """Fetch all trades that are currently marked as OPEN in the database."""
-    if not DATABASE_URL or "sqlite" in DATABASE_URL:
+    if not DATABASE_URL:
         return []
     try:
         with Session(engine) as session:
@@ -222,7 +222,7 @@ def get_open_trades() -> List[TradeRecord]:
 
 def get_recent_closed_trades(limit: int = 50) -> List[TradeRecord]:
     """Fetch recent closed trades from the database for the Trade Log."""
-    if not DATABASE_URL or "sqlite" in DATABASE_URL:
+    if not DATABASE_URL:
         return []
     try:
         with Session(engine) as session:
@@ -249,7 +249,7 @@ def get_trades_for_date(date_str: str) -> List[TradeRecord]:
 
 def get_daily_performance() -> List[dict]:
     """Get profit/loss grouped by date and symbol."""
-    if not DATABASE_URL or "sqlite" in DATABASE_URL:
+    if not DATABASE_URL:
         return []
     try:
         with Session(engine) as session:
@@ -281,9 +281,7 @@ def get_daily_performance() -> List[dict]:
 
 def clear_all_trades():
     """Wipe all trade records from the database."""
-    if not DATABASE_URL or "sqlite" in DATABASE_URL:
-        # For SQLite, we can just delete the file or the table
-        # But let's use SQLModel to be safe
+    if not DATABASE_URL:
         pass
     
     try:

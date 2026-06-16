@@ -1,0 +1,62 @@
+{
+  "b816c908-162f-4bf8-b109-e1e2a4ecda1c": [
+    {
+      "instrument": "NFO:56371",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 186.95,
+      "strike": 23950.0,
+      "option_type": "PE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:56357",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 139.65,
+      "strike": 23850.0,
+      "option_type": "PE",
+      "exit_price": null
+    }
+  ],
+  "a3ffb6ec-823f-4569-bb6a-07683116faa1": [
+    {
+      "instrument": "NFO:56373",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 210.1,
+      "strike": 24000.0,
+      "option_type": "PE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:56359",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 159.45,
+      "strike": 23900.0,
+      "option_type": "PE",
+      "exit_price": null
+    }
+  ],
+  "7cc26fa5-7955-4a90-9eaa-011aa8ab568c": [
+    {
+      "instrument": "NIFTY-Jun2026-23900-CE",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 188.2,
+      "strike": 23900.0,
+      "option_type": "CE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NIFTY-Jun2026-24000-CE",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 140.1,
+      "strike": 24000.0,
+      "option_type": "CE",
+      "exit_price": null
+    }
+  ]
+}

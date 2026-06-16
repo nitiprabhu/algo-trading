@@ -183,7 +183,89 @@ class TelegramNotifier:
                 
             await asyncio.sleep(2)
 
+    def _recalculate_open_positions_pnl(self, runtime) -> None:
+        """Dynamically recalculate MTM PnL for all open positions in memory using current LTPs."""
+        if not hasattr(runtime, "_token_ltp") or not runtime._token_ltp:
+            return
+        
+        ltp_map = runtime._token_ltp
+        from services.chartedge_core.models import Direction
+        
+        def resolve_symbol_to_token_id(symbol: str, runtime) -> Optional[str]:
+            if not symbol:
+                return None
+            stripped = symbol.split(":", 1)[1] if ":" in symbol else symbol
+            if stripped.isdigit():
+                return stripped
+            if not hasattr(runtime, "dm") or not runtime.dm:
+                return None
+            try:
+                if getattr(runtime.dm, "_fno_df", None) is None:
+                    runtime.dm._fetch_fno_master()
+                df = runtime.dm._fno_df
+                if df is not None:
+                    mask = df['TRADING_SYMBOL'].str.upper() == symbol.upper()
+                    res = df[mask]
+                    if not res.empty:
+                        return str(int(res.iloc[0]['SECURITY_ID']))
+            except Exception as e:
+                print(f"Error resolving symbol {symbol} to token ID: {e}")
+            return None
+
+        # 1. Options Positions
+        if hasattr(runtime, "trader") and runtime.trader:
+            for trade in runtime.trader.open_positions.values():
+                # Leg-based MTM logic
+                if getattr(trade, "legs", []):
+                    net_price = 0.0
+                    all_legs_priced = True
+                    for leg in trade.legs:
+                        leg_price = ltp_map.get(leg.instrument)
+                        if leg_price is None:
+                            stripped = leg.instrument.split(":", 1)[1] if ":" in leg.instrument else leg.instrument
+                            leg_price = ltp_map.get(stripped)
+                        if leg_price is None:
+                            token_id = resolve_symbol_to_token_id(leg.instrument, runtime)
+                            if token_id:
+                                leg_price = ltp_map.get(token_id)
+                        if leg_price is None:
+                            all_legs_priced = False
+                            break
+                        multiplier = 1 if leg.action == Direction.BUY else -1
+                        net_price += (leg_price * leg.ratio * multiplier)
+                    if all_legs_priced:
+                        current_price = abs(round(net_price, 2))
+                        direction_mult = 1 if trade.direction == Direction.BUY else -1
+                        trade.pnl = round((current_price - trade.entry_price) * trade.quantity * direction_mult, 2)
+                        trade.pnl_pct = round((trade.pnl / (trade.entry_price * trade.quantity)) * 100, 2) if trade.entry_price > 0 and trade.quantity > 0 else 0.0
+                else:
+                    # Single leg or direct instrument
+                    current_price = ltp_map.get(trade.instrument)
+                    if current_price is None:
+                        stripped = trade.instrument.split(":", 1)[1] if ":" in trade.instrument else trade.instrument
+                        current_price = ltp_map.get(stripped)
+                    if current_price is not None:
+                        direction_mult = 1 if trade.direction == Direction.BUY else -1
+                        trade.pnl = round((current_price - trade.entry_price) * trade.quantity * direction_mult, 2)
+                        trade.pnl_pct = round((trade.pnl / (trade.entry_price * trade.quantity)) * 100, 2) if trade.entry_price > 0 and trade.quantity > 0 else 0.0
+
+        # 2. Futures Positions
+        if hasattr(runtime, "futures_trader") and runtime.futures_trader:
+            for trade in runtime.futures_trader.open_positions.values():
+                current_price = ltp_map.get(trade.instrument)
+                if current_price is None:
+                    stripped = trade.instrument.split(":", 1)[1] if ":" in trade.instrument else trade.instrument
+                    current_price = ltp_map.get(stripped)
+                # Fallback to NIFTY spot or FUT
+                if current_price is None and "NIFTY" in trade.instrument.upper():
+                    current_price = ltp_map.get("NIFTY_FUT") or ltp_map.get("NIFTY")
+                if current_price is not None:
+                    direction_mult = 1 if trade.direction == Direction.BUY else -1
+                    trade.pnl = round((current_price - trade.entry_price) * direction_mult * trade.quantity, 2)
+                    trade.pnl_pct = round(trade.pnl / trade.invested_amount * 100, 2) if trade.invested_amount > 0 else 0.0
+
     async def _handle_command(self, command: str, runtime) -> None:
+        self._recalculate_open_positions_pnl(runtime)
         if command in ("/start", "/help"):
             msg = (
                 "🤖 *ChartEdge AI Commands:*\n\n"
@@ -221,10 +303,44 @@ class TelegramNotifier:
             
             if opt_positions:
                 msg += "*Options Positions:*\n"
+                
+                def resolve_token_to_symbol(token_id: str, runtime) -> str:
+                    if not token_id:
+                        return ""
+                    stripped = token_id.split(":", 1)[1] if ":" in token_id else token_id
+                    if not stripped.isdigit():
+                        return token_id
+                    if not hasattr(runtime, "dm") or not runtime.dm:
+                        return token_id
+                    try:
+                        if getattr(runtime.dm, "_fno_df", None) is None:
+                            runtime.dm._fetch_fno_master()
+                        df = runtime.dm._fno_df
+                        if df is not None:
+                            mask = df['SECURITY_ID'] == int(stripped)
+                            res = df[mask]
+                            if not res.empty:
+                                return str(res.iloc[0]['TRADING_SYMBOL'])
+                    except Exception:
+                        pass
+                    return token_id
+
                 for trade in opt_positions:
                     pnl_emoji = "🟢" if trade.pnl >= 0 else "🔴"
+                    
+                    import re
+                    from datetime import datetime
+                    display_inst = trade.instrument
+                    match = re.search(r'_(\d{2}[A-Z]{3}\d{2})', trade.instrument)
+                    if match:
+                        try:
+                            dt = datetime.strptime(match.group(1), "%d%b%y")
+                            display_inst = f"{trade.instrument} (Expiry: {dt.strftime('%d-%b-%Y')})"
+                        except:
+                            pass
+                            
                     msg += (
-                        f"• `{trade.instrument}` ({trade.direction.value})\n"
+                        f"• `{display_inst}` ({trade.direction.value})\n"
                         f"  Qty: {trade.quantity} | Entry: `₹{trade.entry_price:.2f}`\n"
                         f"  SL: `₹{trade.sl_price:.2f}` | T1: `₹{trade.t1_price:.2f}`\n"
                         f"  PnL: {pnl_emoji} `₹{trade.pnl:.2f}` (`{trade.pnl_pct:+.2f}%`)\n"
@@ -232,15 +348,28 @@ class TelegramNotifier:
                     if getattr(trade, "legs", []):
                         msg += "  _Legs:_\n"
                         for leg in trade.legs:
-                            msg += f"    - {leg.action.value} `{leg.instrument}` @ `₹{leg.entry_price:.2f}` (Strike: {leg.strike})\n"
+                            leg_name = resolve_token_to_symbol(leg.instrument, runtime)
+                            msg += f"    - {leg.action.value} `{leg_name}` @ `₹{leg.entry_price:.2f}` (Strike: {leg.strike})\n"
                 msg += "\n"
                 
             if fut_positions:
                 msg += "*Futures Positions:*\n"
                 for trade in fut_positions:
                     pnl_emoji = "🟢" if trade.pnl >= 0 else "🔴"
+                    
+                    import re
+                    from datetime import datetime
+                    display_inst = trade.instrument
+                    match = re.search(r'_(\d{2}[A-Z]{3}\d{2})', trade.instrument)
+                    if match:
+                        try:
+                            dt = datetime.strptime(match.group(1), "%d%b%y")
+                            display_inst = f"{trade.instrument} (Expiry: {dt.strftime('%d-%b-%Y')})"
+                        except:
+                            pass
+                            
                     msg += (
-                        f"• `{trade.instrument}` ({trade.direction})\n"
+                        f"• `{display_inst}` ({trade.direction})\n"
                         f"  Qty: {trade.quantity} | Entry: `₹{trade.entry_price:.2f}`\n"
                         f"  SL: `₹{trade.sl_price:.2f}` | T1: `₹{trade.t1_price:.2f}`\n"
                         f"  PnL: {pnl_emoji} `₹{trade.pnl:.2f}` (`{trade.pnl_pct:+.2f}%`)\n"

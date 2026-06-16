@@ -138,9 +138,7 @@ class FuturesTradingEngine:
             IST = ZoneInfo("Asia/Kolkata")
             entry_time = r.entry_time
             if entry_time is not None:
-                if entry_time.tzinfo is None:
-                    entry_time = entry_time.replace(tzinfo=timezone.utc).astimezone(IST).replace(tzinfo=None)
-                else:
+                if entry_time.tzinfo is not None:
                     entry_time = entry_time.astimezone(IST).replace(tzinfo=None)
 
                 
@@ -288,6 +286,20 @@ class FuturesTradingEngine:
 
         if not self.is_backtesting:
             persist_trade_entry(trade.to_paper_trade())
+            # Log to realtime/trades_YYYY-MM-DD.log
+            log_msg = (
+                f"🚀 FUTURES ENTERED\n\n"
+                f"🌐 Instrument: {trade.instrument}\n"
+                f"📈 Direction: {trade.direction.value}\n"
+                f"💰 Entry Price: ₹{trade.entry_price:.2f}\n"
+                f"📦 Quantity: {trade.quantity} ({trade.quantity // trade.lot_size} lot)\n"
+                f"🛡️ Stop Loss: ₹{trade.sl_price:.2f}\n"
+                f"🎯 Target 1: ₹{trade.t1_price:.2f}\n"
+                f"🎯 Target 2: ₹{trade.t2_price:.2f}\n\n"
+                f"🧠 Reason: {signal.reasoning or 'No reason provided.'}"
+            )
+            from services.chartedge_core.training_logger import log_realtime_trade_action
+            log_realtime_trade_action(log_msg)
             await self._send_telegram_entry(trade)
 
         return trade
@@ -437,6 +449,18 @@ class FuturesTradingEngine:
 
         if not self.is_backtesting:
             persist_trade_exit(trade.to_paper_trade())
+            # Log to realtime/trades_YYYY-MM-DD.log
+            emoji = "🟢" if trade.pnl >= 0 else "🔴"
+            log_msg = (
+                f"🏁 FUTURES CLOSED\n\n"
+                f"🌐 Instrument: {trade.instrument}\n"
+                f"📉 Exit Price: ₹{trade.exit_price:.2f}\n"
+                f"🚪 Exit Reason: {trade.exit_reason}\n"
+                f"{emoji} PnL: ₹{trade.pnl:.2f} ({trade.pnl_pct:.2f}%)\n\n"
+                f"💵 Invested Amount: ₹{trade.invested_amount:.2f}"
+            )
+            from services.chartedge_core.training_logger import log_realtime_trade_action
+            log_realtime_trade_action(log_msg)
             await self._send_telegram_exit(trade)
 
     async def force_close_all(self, price_map: dict[str, float], now: datetime, reason: str) -> None:

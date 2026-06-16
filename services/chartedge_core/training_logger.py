@@ -118,3 +118,72 @@ class OptionsLogger(TrainingLogger):
 # Global instances
 training_logger = TrainingLogger()
 options_logger = OptionsLogger()
+
+def log_realtime_trade_action(msg: str):
+    root = Path(__file__).resolve().parents[2]
+    realtime_dir = root / "realtime"
+    realtime_dir.mkdir(exist_ok=True)
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    log_file = realtime_dir / f"trades_{today_str}.log"
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(msg.strip() + "\n\n" + "="*50 + "\n\n")
+
+def save_trade_legs_to_cache(trade_id: str, legs: list):
+    root = Path(__file__).resolve().parents[2]
+    realtime_dir = root / "realtime"
+    realtime_dir.mkdir(exist_ok=True)
+    cache_file = realtime_dir / "legs_cache.json"
+    
+    # Load existing cache
+    cache = {}
+    if cache_file.exists():
+        try:
+            with open(cache_file, "r") as f:
+                cache = json.load(f)
+        except Exception:
+            pass
+            
+    # Serialize legs
+    serialized_legs = []
+    for leg in legs:
+        serialized_legs.append({
+            "instrument": leg.instrument,
+            "action": leg.action.value,
+            "ratio": leg.ratio,
+            "entry_price": leg.entry_price,
+            "strike": leg.strike,
+            "option_type": leg.option_type,
+            "exit_price": leg.exit_price
+        })
+        
+    cache[trade_id] = serialized_legs
+    with open(cache_file, "w") as f:
+        json.dump(cache, f, indent=2)
+
+def load_trade_legs_from_cache(trade_id: str) -> list | None:
+    root = Path(__file__).resolve().parents[2]
+    cache_file = root / "realtime" / "legs_cache.json"
+    if not cache_file.exists():
+        return None
+    try:
+        with open(cache_file, "r") as f:
+            cache = json.load(f)
+        legs_data = cache.get(trade_id)
+        if not legs_data:
+            return None
+            
+        from services.chartedge_core.models import LegExecution, Direction
+        legs = []
+        for leg in legs_data:
+            legs.append(LegExecution(
+                instrument=leg["instrument"],
+                action=Direction.BUY if leg["action"] == "BUY" else Direction.SELL,
+                ratio=leg["ratio"],
+                entry_price=leg["entry_price"],
+                strike=leg["strike"],
+                option_type=leg["option_type"],
+                exit_price=leg["exit_price"]
+            ))
+        return legs
+    except Exception:
+        return None

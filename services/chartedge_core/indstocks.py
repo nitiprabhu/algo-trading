@@ -46,6 +46,7 @@ class IndstocksMarketRuntime(MarketSimulator):
         token = os.getenv("INDMONEY_TOKEN") or os.getenv("INDSTOCKS_TOKEN")
         # Initialize even without token to use cache if available
         self.dm = DerivativeManager(token or "DUMMY_TOKEN")
+        self.trader.dm = self.dm
         self._cached_deriv_tokens: dict = {}
         self._last_deriv_update = datetime.min
         self._token_oi = {}   # Track real-time OI
@@ -544,8 +545,6 @@ class IndstocksMarketRuntime(MarketSimulator):
                                     print("DEBUG: WebSocket Loop Heartbeat - Active (Non-Market Hours / Quiet)")
                                     last_heartbeat = time.time()
                                 continue
-
-                        print(f"DEBUG: Raw message received: {message[:100]}...")
                         if "40000001" in message:
                             with open("raw_ticks.log", "a") as rf:
                                 rf.write(message + "\n")
@@ -652,7 +651,8 @@ class IndstocksMarketRuntime(MarketSimulator):
         raw_token = str(message.get("instrument", ""))
         # Normalize: strip exchange prefix so "NIDX:40000001" and "40000001" both work
         token_id = raw_token.split(":", 1)[1] if ":" in raw_token else raw_token
-        print(f"DEBUG: Received tick for token {token_id}")
+        # Track total tick count
+        self._tick_count = getattr(self, "_tick_count", 0) + 1
 
         # Track OI for all tokens (including options)
         # Robust price extraction
@@ -663,12 +663,24 @@ class IndstocksMarketRuntime(MarketSimulator):
             self._token_ltp[token_id] = ltp
             symbol = self._token_to_symbol.get(token_id)
             if symbol:
-                print(f"DEBUG: Tick -> Symbol: {symbol}, Price: {ltp}")
+                self._symbol_tick_counts = getattr(self, "_symbol_tick_counts", {})
+                self._symbol_tick_counts[symbol] = self._symbol_tick_counts.get(symbol, 0) + 1
 
         # Track OI
         oi = data.get("oi")
         if oi is not None:
             self._token_oi[token_id] = float(oi)
+
+        # Print summary every 5 minutes (300 seconds)
+        now = time.time()
+        self._last_tick_log_time = getattr(self, "_last_tick_log_time", now)
+        if now - self._last_tick_log_time >= 300:
+            stats_str = ", ".join(f"{sym}: {cnt} ticks" for sym, cnt in getattr(self, "_symbol_tick_counts", {}).items())
+            print(f"📡 Tick Stream Summary: Received {self._tick_count} ticks total in the last 5 minutes ({stats_str})")
+            self._last_tick_log_time = now
+            self._tick_count = 0
+            if hasattr(self, "_symbol_tick_counts"):
+                self._symbol_tick_counts.clear()
 
         if ltp == 0:
             return

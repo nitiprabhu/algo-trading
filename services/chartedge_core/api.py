@@ -99,6 +99,22 @@ def debug_option(symbol: str = "NIFTY", side: str = "BUY") -> dict:
         "chain": data.chain if data else []
     }
 
+@app.get("/api/debug/ltp")
+def debug_ltp() -> dict:
+    return {
+        "tokens": runtime._token_ltp,
+        "positions": [
+            {
+                "instrument": t.instrument,
+                "legs": [
+                    {"instrument": leg.instrument, "strike": leg.strike, "option_type": leg.option_type}
+                    for leg in getattr(t, "legs", [])
+                ]
+            }
+            for t in runtime.trader.open_positions.values()
+        ]
+    }
+
 @app.get("/api/debug/candles")
 def debug_candles() -> dict:
     return {s: len(c) for s, c in runtime.candles.items()}

@@ -83,9 +83,7 @@ class PaperTradingEngine:
             IST = ZoneInfo("Asia/Kolkata")
             entry_time = r.entry_time
             if entry_time is not None:
-                if entry_time.tzinfo is None:
-                    entry_time = entry_time.replace(tzinfo=timezone.utc).astimezone(IST).replace(tzinfo=None)
-                else:
+                if entry_time.tzinfo is not None:
                     entry_time = entry_time.astimezone(IST).replace(tzinfo=None)
             trade = PaperTrade(
                 id=UUID(r.trade_id),
@@ -455,7 +453,7 @@ class PaperTradingEngine:
         trade_legs = []
         for leg_data in getattr(signal, "legs", []):
             trade_legs.append(LegExecution(
-                instrument=leg_data["symbol"],
+                instrument=leg_data.get("token") or leg_data["symbol"],
                 action=Direction.BUY if leg_data["action"] == "BUY" else Direction.SELL,
                 ratio=leg_data.get("ratio", 1),
                 entry_price=leg_data.get("entry_price", leg_data.get("ltp", 0.0)),
@@ -487,12 +485,45 @@ class PaperTradingEngine:
         self.open_positions[trade_instrument] = trade
         if not self.is_backtesting:
             persist_trade_entry(trade)
+            # Log to realtime/trades_YYYY-MM-DD.log
+            log_msg = (
+                f"🚀 TRADE ENTERED\n\n"
+                f"🌐 Instrument: {trade.instrument}\n"
+                f"📈 Direction: {trade.direction.value}\n"
+                f"💰 Entry Price: ₹{trade.entry_price:.2f}\n"
+                f"📦 Quantity: {trade.quantity}\n"
+                f"🛡️ Stop Loss: ₹{trade.sl_price:.2f}\n"
+                f"🎯 Target 1: ₹{trade.t1_price:.2f}\n"
+                f"🎯 Target 2: ₹{trade.t2_price:.2f}\n\n"
+            )
+            if trade.legs:
+                log_msg += "⛓️ Leg Details:\n"
+                for leg in trade.legs:
+                    log_msg += f"• {leg.action.value} {leg.instrument} @ ₹{leg.entry_price:.2f} (Strike: {leg.strike})\n"
+                log_msg += "\n"
+            log_msg += f"🧠 Reason: {signal.reasoning or 'No reason provided.'}"
+            from services.chartedge_core.training_logger import log_realtime_trade_action, save_trade_legs_to_cache
+            log_realtime_trade_action(log_msg)
+            if trade.legs:
+                save_trade_legs_to_cache(str(trade.id), trade.legs)
+
             # Send Telegram Alert asynchronously
             import asyncio
             from services.chartedge_core.telegram import notifier
+            display_inst = trade.instrument
+            import re
+            from datetime import datetime
+            match = re.search(r'_(\d{2}[A-Z]{3}\d{2})', trade.instrument)
+            if match:
+                try:
+                    dt = datetime.strptime(match.group(1), "%d%b%y")
+                    display_inst = f"{trade.instrument} (Expiry: {dt.strftime('%d-%b-%Y')})"
+                except:
+                    pass
+                    
             msg = (
                 f"🚀 *TRADE ENTERED*\n\n"
-                f"🌐 *Instrument:* `{trade.instrument}`\n"
+                f"🌐 *Instrument:* `{display_inst}`\n"
                 f"📈 *Direction:* `{trade.direction.value}`\n"
                 f"💰 *Entry Price:* `₹{trade.entry_price:.2f}`\n"
                 f"📦 *Quantity:* `{trade.quantity}`\n"
@@ -537,6 +568,19 @@ class PaperTradingEngine:
                     if leg_price is None and ltp_map:
                         stripped_leg = leg.instrument.split(":", 1)[1] if ":" in leg.instrument else leg.instrument
                         leg_price = ltp_map.get(stripped_leg)
+                    if leg_price is None and ltp_map and hasattr(self, "dm") and self.dm:
+                        try:
+                            if self.dm._fno_df is None:
+                                self.dm._fetch_fno_master()
+                            df = self.dm._fno_df
+                            if df is not None:
+                                mask = df['TRADING_SYMBOL'].str.upper() == leg.instrument.upper()
+                                res = df[mask]
+                                if not res.empty:
+                                    token_id = str(int(res.iloc[0]['SECURITY_ID']))
+                                    leg_price = ltp_map.get(token_id)
+                        except Exception as ex:
+                            print(f"⚠️ Error resolving leg symbol {leg.instrument} in MTM: {ex}")
                     if leg_price is None and self.is_backtesting and trade.underlying_entry_price:
                         # BS estimate
                         underlying_sym = "BANKNIFTY" if "BANKNIFTY" in trade.instrument.upper() else "NIFTY"
@@ -904,13 +948,42 @@ class PaperTradingEngine:
             self.cooldown_until = None
         if not self.is_backtesting:
             persist_trade_exit(trade)
+            # Log to realtime/trades_YYYY-MM-DD.log
+            emoji = "🟢" if trade.pnl >= 0 else "🔴"
+            log_msg = (
+                f"🏁 TRADE CLOSED\n\n"
+                f"🌐 Instrument: {trade.instrument}\n"
+                f"📉 Exit Price: ₹{trade.exit_price:.2f}\n"
+                f"🚪 Exit Reason: {trade.exit_reason}\n"
+                f"{emoji} PnL: ₹{trade.pnl:.2f} ({trade.pnl_pct:.2f}%)\n\n"
+            )
+            if trade.legs:
+                log_msg += "⛓️ Leg Details:\n"
+                for leg in trade.legs:
+                    exit_price_str = f"₹{leg.exit_price:.2f}" if leg.exit_price is not None else "N/A"
+                    log_msg += f"• {leg.action.value} {leg.instrument} (Entry: ₹{leg.entry_price:.2f}, Exit: {exit_price_str})\n"
+                log_msg += "\n"
+            log_msg += f"💵 Invested Amount: ₹{trade.invested_amount:.2f}"
+            from services.chartedge_core.training_logger import log_realtime_trade_action
+            log_realtime_trade_action(log_msg)
+
             # Send Telegram Alert asynchronously
             import asyncio
             from services.chartedge_core.telegram import notifier
-            emoji = "🟢" if trade.pnl >= 0 else "🔴"
+            display_inst = trade.instrument
+            import re
+            from datetime import datetime
+            match = re.search(r'_(\d{2}[A-Z]{3}\d{2})', trade.instrument)
+            if match:
+                try:
+                    dt = datetime.strptime(match.group(1), "%d%b%y")
+                    display_inst = f"{trade.instrument} (Expiry: {dt.strftime('%d-%b-%Y')})"
+                except:
+                    pass
+                    
             msg = (
                 f"🏁 *TRADE CLOSED*\n\n"
-                f"🌐 *Instrument:* `{trade.instrument}`\n"
+                f"🌐 *Instrument:* `{display_inst}`\n"
                 f"📉 *Exit Price:* `₹{trade.exit_price:.2f}`\n"
                 f"🚪 *Exit Reason:* `{trade.exit_reason}`\n"
                 f"{emoji} *PnL:* `₹{trade.pnl:.2f}` ({trade.pnl_pct:.2f}%)\n\n"

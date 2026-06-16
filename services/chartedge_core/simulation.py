@@ -622,6 +622,15 @@ class MarketSimulator:
             if getattr(trade, "legs", []):
                 continue
                 
+            from services.chartedge_core.training_logger import load_trade_legs_from_cache
+            cached_legs = load_trade_legs_from_cache(str(trade.id))
+            if cached_legs:
+                trade.legs = cached_legs
+                print(f"✅ Reconstructed legs from cache for recovered trade {trade.instrument}:")
+                for leg in trade.legs:
+                    print(f"  - {leg.action.value} {leg.instrument} @ strike {leg.strike}")
+                continue
+                
             # If symbol matches multi-leg structure format, e.g. "IRON_CONDOR:NIFTY_23JUN26"
             if ":" not in trade.instrument:
                 continue

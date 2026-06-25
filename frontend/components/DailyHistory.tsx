@@ -32,7 +32,7 @@ export function DailyHistory() {
   }, []);
 
   return (
-    <section className="panel span2">
+    <section className="panel">
       <div className="panelHeader">
         <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
           <CalendarDays size={20} className="accent" />

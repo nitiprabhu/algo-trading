@@ -167,6 +167,29 @@ h2 {
   grid-column: span 2;
 }
 
+.span3 {
+  grid-column: span 3;
+}
+
+.section-header {
+  grid-column: span 3;
+  margin-top: 2.5rem;
+  margin-bottom: 1.25rem;
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 0.5rem;
+}
+
+.section-header h2 {
+  font-size: 1.15rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .panel {
   min-width: 0;
   padding: 14px;
@@ -285,7 +308,26 @@ dd {
 .indicatorGrid {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
+}
+
+.instrumentGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.instrumentCard {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  transition: transform 0.2s, border-color 0.2s;
+}
+
+.instrumentCard:hover {
+  transform: translateY(-2px);
+  border-color: var(--accent);
 }
 
 .indicatorGroup {

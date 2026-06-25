@@ -319,8 +319,87 @@ class FiveEMAScalping(OptionStrategy):
                     "reason": f"5EMA Scalp: Price breached Alert Candle High with 5m confirm (VIX: {india_vix})",
                     "sl": self.alert_candle.low
                 }
-                self.alert_candle = None  # Reset after trigger
-                return res
+                self.alert_candle = None
+        
+        return None
+
+class VWAPReversionStrategy(OptionStrategy):
+    """
+    Mean Reversion Strategy for Futures on Choppy Days.
+    
+    Trigger: Price deviates > 0.5% from VWAP then touches/crosses back.
+    Only triggers between 10:30 and 14:00 (past ORB, before EOD theta).
+    Filter: ADX < 25 (only in range-bound markets).
+    """
+    SUPPORTED_INSTRUMENTS = ("NIFTY",)
+    ENTRY_START = time(10, 30)
+    ENTRY_END   = time(14, 0)
+    
+    def __init__(self):
+        self.state = {
+            "overextended_above": False,
+            "overextended_below": False,
+            "extreme_high": 0.0,
+            "extreme_low": float("inf"),
+        }
+        
+    def update(self, candle: Candle) -> None:
+        pass
+        
+    def get_signal(self, candle: Candle, india_vix: float = 0.0, **kwargs) -> Optional[Dict]:
+        if candle.instrument not in self.SUPPORTED_INSTRUMENTS:
+            return None
+            
+        t = candle.time.time()
+        if not (self.ENTRY_START <= t <= self.ENTRY_END):
+            self.state["overextended_above"] = False
+            self.state["overextended_below"] = False
+            return None
+            
+        vwap = kwargs.get("vwap", 0.0)
+        adx = kwargs.get("adx", 0.0)
+        
+        if vwap <= 0 or adx >= 25:
+            return None
+            
+        deviation = (candle.close - vwap) / vwap
+        
+        # Track overextension
+        if deviation > 0.005:
+            self.state["overextended_above"] = True
+            self.state["extreme_high"] = max(self.state["extreme_high"], candle.high)
+        elif deviation < -0.005:
+            self.state["overextended_below"] = True
+            self.state["extreme_low"] = min(self.state["extreme_low"], candle.low)
+            
+        # Trigger on reversion
+        if self.state["overextended_above"] and candle.close <= vwap:
+            sl = self.state["extreme_high"]
+            self.state["overextended_above"] = False
+            self.state["extreme_high"] = 0.0
+            print(f"🔥 [FUT-VWAP] SELL Reversion at {candle.time} (VWAP={vwap:.2f}, SL={sl:.2f})")
+            return {
+                "strategy": "FUT_VWAP_REV",
+                "direction": "SELL",
+                "option_type": None,
+                "instrument_override": "NIFTY_FUT",
+                "reason": f"Nifty Futures VWAP Reversion SELL (ADX={adx:.1f} < 25)",
+                "sl": sl,
+            }
+            
+        if self.state["overextended_below"] and candle.close >= vwap:
+            sl = self.state["extreme_low"]
+            self.state["overextended_below"] = False
+            self.state["extreme_low"] = float("inf")
+            print(f"🔥 [FUT-VWAP] BUY Reversion at {candle.time} (VWAP={vwap:.2f}, SL={sl:.2f})")
+            return {
+                "strategy": "FUT_VWAP_REV",
+                "direction": "BUY",
+                "option_type": None,
+                "instrument_override": "NIFTY_FUT",
+                "reason": f"Nifty Futures VWAP Reversion BUY (ADX={adx:.1f} < 25)",
+                "sl": sl,
+            }
             
         return None
 
@@ -392,7 +471,6 @@ class NiftyFuturesORB(OptionStrategy):
             s["breakout_dir"]   = None
             s["recent_volumes"] = []
             s["traded_today"]   = False
-            s["closes_15m"]     = []
 
         t = candle.time.time()
 
@@ -447,7 +525,7 @@ class NiftyFuturesORB(OptionStrategy):
                 return sig
 
         # ── Session 2: Midday Trend ─────────────────────────────────────────────
-        if self.MID_START <= t <= self.MID_END and s["ema9"] and s["ema21"]:
+        if self.MID_START <= t <= self.MID_END:
             sig = self._check_trend(candle, s, "MIDDAY", india_vix, vwap)
             if sig:
                 s["traded_today"] = True
@@ -469,53 +547,74 @@ class NiftyFuturesORB(OptionStrategy):
         body_ratio = abs(candle.close - candle.open) / candle_rng
         avg_vol = sum(s["recent_volumes"]) / len(s["recent_volumes"]) if s["recent_volumes"] else 0
 
+        # Dynamic SL: use range boundary but cap at 80 points max distance
+        range_width = s["range_high"] - s["range_low"]
+        max_sl_distance = min(range_width, 80.0)
+
         if candle.close > s["range_high"]:
             if body_ratio < self.BODY_MIN or (avg_vol > 0 and candle.volume < avg_vol * self.VOL_MULT):
                 return None
             s["breakout_dir"] = "BUY"
-            print(f"🔥 [FUT-ORB] BUY above {s['range_high']:.2f} at {candle.time}")
+            sl = max(s["range_low"], candle.close - max_sl_distance)
+            print(f"🔥 [FUT-ORB] BUY above {s['range_high']:.2f} at {candle.time} (SL={sl:.2f}, range={range_width:.0f}pts)")
             return {
                 "strategy": "FUT_ORB",
                 "direction": "BUY",
                 "option_type": None,
-                "reason": f"Nifty Futures ORB BUY breakout above {s['range_high']:.2f} (VIX={vix:.1f})",
-                "sl": s["range_low"],
+                "reason": f"Nifty Futures ORB BUY breakout above {s['range_high']:.2f} (VIX={vix:.1f}, range={range_width:.0f}pts)",
+                "sl": sl,
             }
 
         if candle.close < s["range_low"]:
             if body_ratio < self.BODY_MIN or (avg_vol > 0 and candle.volume < avg_vol * self.VOL_MULT):
                 return None
             s["breakout_dir"] = "SELL"
-            print(f"🔥 [FUT-ORB] SELL below {s['range_low']:.2f} at {candle.time}")
+            sl = min(s["range_high"], candle.close + max_sl_distance)
+            print(f"🔥 [FUT-ORB] SELL below {s['range_low']:.2f} at {candle.time} (SL={sl:.2f}, range={range_width:.0f}pts)")
             return {
                 "strategy": "FUT_ORB",
                 "direction": "SELL",
                 "option_type": None,
-                "reason": f"Nifty Futures ORB SELL breakdown below {s['range_low']:.2f} (VIX={vix:.1f})",
-                "sl": s["range_high"],
+                "reason": f"Nifty Futures ORB SELL breakdown below {s['range_low']:.2f} (VIX={vix:.1f}, range={range_width:.0f}pts)",
+                "sl": sl,
             }
         return None
 
     def _check_trend(self, candle: Candle, s: dict, session: str, vix: float, vwap: float) -> Optional[Dict]:
-        if not s["ema9"] or not s["ema21"]:
+        # Primary: use EMA crossover if we have enough data
+        has_ema = s["ema9"] and s["ema21"]
+        # Fallback: if EMAs not ready yet (< 21 bars), use price vs VWAP
+        if has_ema:
+            is_bullish = s["ema9"] > s["ema21"] and candle.close > vwap
+            is_bearish = s["ema9"] < s["ema21"] and candle.close < vwap
+        elif vwap > 0:
+            # EMA data insufficient — use VWAP + price momentum as proxy
+            is_bullish = candle.close > vwap and candle.close > candle.open
+            is_bearish = candle.close < vwap and candle.close < candle.open
+        else:
             return None
-        if s["ema9"] > s["ema21"] and candle.close > vwap:
-            print(f"🔥 [FUT-{session}] BUY — EMA9 > EMA21, above VWAP")
+
+        if is_bullish:
+            sl_ref = s["ema21"] if has_ema else vwap
+            sl = min(sl_ref, vwap) if vwap else sl_ref
+            print(f"\U0001f525 [FUT-{session}] BUY — {'EMA9 > EMA21' if has_ema else 'VWAP momentum'}, above VWAP")
             return {
                 "strategy": f"FUT_{session}",
                 "direction": "BUY",
                 "option_type": None,
-                "reason": f"Nifty Futures {session} BUY — EMA9 > EMA21, above VWAP (VIX={vix:.1f})",
-                "sl": min(s["ema21"], vwap) if vwap else s["ema21"],
+                "reason": f"Nifty Futures {session} BUY — {'EMA9 > EMA21' if has_ema else 'VWAP momentum'}, above VWAP (VIX={vix:.1f})",
+                "sl": sl,
             }
-        if s["ema9"] < s["ema21"] and candle.close < vwap:
-            print(f"🔥 [FUT-{session}] SELL — EMA9 < EMA21, below VWAP")
+        if is_bearish:
+            sl_ref = s["ema21"] if has_ema else vwap
+            sl = max(sl_ref, vwap) if vwap else sl_ref
+            print(f"\U0001f525 [FUT-{session}] SELL — {'EMA9 < EMA21' if has_ema else 'VWAP momentum'}, below VWAP")
             return {
                 "strategy": f"FUT_{session}",
                 "direction": "SELL",
                 "option_type": None,
-                "reason": f"Nifty Futures {session} SELL — EMA9 < EMA21, below VWAP (VIX={vix:.1f})",
-                "sl": max(s["ema21"], vwap) if vwap else s["ema21"],
+                "reason": f"Nifty Futures {session} SELL — {'EMA9 < EMA21' if has_ema else 'VWAP momentum'}, below VWAP (VIX={vix:.1f})",
+                "sl": sl,
             }
         return None
 

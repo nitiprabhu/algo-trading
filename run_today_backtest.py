@@ -27,7 +27,7 @@ async def main():
     print(f"📊 Timeframe: {config.risk.get('timeframe_mins')}m")
     
     # Run backtest
-    results = await runtime.run_backtest(start, end)
+    results = await runtime.run_backtest(start, end, run_regime_agent=True)
     
     print("\n" + "="*50)
     print("🏁 BACKTEST RESULTS")
@@ -39,9 +39,17 @@ async def main():
     
     # Print trade summary
     print("\n📈 PERFORMANCE SUMMARY")
-    print(f"Total Trades: {len(runtime.trader.closed_trades)}")
-    pnl = sum(t.pnl for t in runtime.trader.closed_trades)
-    print(f"Net PnL: ₹{pnl:.2f}")
+    opt_trades = len(runtime.trader.closed_trades)
+    opt_pnl = sum(t.pnl for t in runtime.trader.closed_trades)
+    print(f"Options Trades: {opt_trades} | Net PnL: ₹{opt_pnl:.2f}")
+    
+    fut_trades = len(runtime.futures_trader.closed_trades)
+    fut_pnl = sum(t.pnl for t in runtime.futures_trader.closed_trades)
+    print(f"Futures Trades: {fut_trades} | Net PnL: ₹{fut_pnl:.2f}")
+    
+    total_trades = opt_trades + fut_trades
+    combined_pnl = opt_pnl + fut_pnl
+    print(f"Combined Trades: {total_trades} | Combined Net PnL: ₹{combined_pnl:.2f}")
     print("="*50)
 
 if __name__ == "__main__":

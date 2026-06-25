@@ -213,6 +213,38 @@ class MarketSimulator:
                 self.signal_engine.t315_direction_lock.clear()
             self._last_trading_date = candle_date
 
+        # 1. Update indicators snapshot first if on a timeframe boundary
+        is_boundary = False
+        candles_agg = None
+        boundary_snapshot = None
+        if symbol in self.config.trading_symbols:
+            interval_mins = int(self.config.risk.get("timeframe_mins", 15))
+            if self._is_timeframe_boundary(candle.time, interval_mins) and len(self.candles[symbol]) >= (interval_mins * 2):
+                is_boundary = True
+                candles_agg = self._aggregate_candles(symbol, interval_mins)
+                weights = self.config.indicator_weights.get(symbol, {})
+                indicators = compute_snapshot_indicators(candles_agg, weights)
+
+                # Update RegimeDetector with latest vol/trend metrics
+                vix_val = self.candles.get("INDIAVIX")[-1].close if self.candles.get("INDIAVIX") else 16.0
+                atr_val = indicators.get("atr").value if indicators.get("atr") else 0.0
+                adx_val = indicators.get("adx").value if indicators.get("adx") else 0.0
+                self.regime_detectors[symbol].update(candle.time, vix_val, atr_val, adx_val)
+                regime_summary = self.regime_detectors[symbol].summary()
+
+                boundary_snapshot = IndicatorSnapshot(
+                    instrument=symbol,
+                    timeframe=f"{interval_mins}m",
+                    candle_time=candle.time,
+                    price=candle.close,
+                    indicators=indicators,
+                    confluence_score=score(indicators),
+                    higher_timeframe=self._higher_timeframe(symbol),
+                    market_context=self._get_market_context(),
+                    options_data=self._get_options_data(symbol),
+                    regime_info=regime_summary,
+                )
+
         # Only trading symbols can have positions and signals
         if symbol in self.config.trading_symbols:
             snapshot = self.latest_indicators.get(symbol)
@@ -220,8 +252,13 @@ class MarketSimulator:
 
             # Futures MTM: update on every NIFTY candle
             if symbol == "NIFTY" and self.futures_trader.open_positions:
-                st_ind = snapshot.indicators.get("supertrend") if snapshot else None
-                st_val = st_ind.value if (st_ind and isinstance(st_ind.value, (int, float))) else None
+                st_val = None
+                if is_boundary and boundary_snapshot:
+                    st_ind = boundary_snapshot.indicators.get("supertrend")
+                    st_val = st_ind.value if (st_ind and isinstance(st_ind.value, (int, float))) else None
+                else:
+                    st_ind = snapshot.indicators.get("supertrend") if snapshot else None
+                    st_val = st_ind.value if (st_ind and isinstance(st_ind.value, (int, float))) else None
                 await self.futures_trader.mark_to_market(candle, supertrend_value=st_val)
             
             # 2. Strategy-specific exits and SL updates
@@ -253,27 +290,31 @@ class MarketSimulator:
                 # Intraday ADX trend gate for strategy scalps (5EMA/T315).
                 # Prior-day regime mislabels intraday trend days as chop; use live ADX instead.
                 # Option-buying scalps bleed on no-trend bars — require real intraday momentum.
+                is_blocked = False
                 if self.config.risk.get("strategy_adx_gate", True):
                     adx_ind = snapshot.indicators.get("adx") if snapshot else None
                     adx_min = self.config.risk.get("adx_min_trend", 20.0)
                     if adx_ind is not None and 0 < adx_ind.value < adx_min:
                         print(f"🚫 [ADX Gate] {symbol}: {fo_signal.strategy_name} blocked — ADX {adx_ind.value:.1f} < {adx_min} (no intraday trend)")
-                        return
+                        is_blocked = True
 
                 # Rate Limit Guard
-                if self._is_rate_limited(symbol, fo_signal.strategy_name, candle.time):
-                    return
-
-                # Silence signals during seeding (initial startup) to avoid dashboard spam.
-                # But allow them if we are explicitly in backtesting mode.
-                if not self.is_backtesting and (datetime.now(IST) - candle.time).total_seconds() > 300:
-                    # It's historical seeding, just insert into list but don't "trigger" entry
-                    pass
-                else:
-                    self.last_signal_times[(symbol, fo_signal.strategy_name)] = candle.time
-                    self.last_signal_times[(symbol, "GLOBAL")] = candle.time
-                    # _process_and_enter now handles signal insertion to avoid duplicates
-                    await self._process_and_enter(fo_signal, candle)
+                if not is_blocked and self._is_rate_limited(symbol, fo_signal.strategy_name, candle.time):
+                    is_blocked = True
+                if not is_blocked:
+                    # Silence signals during seeding (initial startup) to avoid dashboard spam.
+                    # But allow them if we are explicitly in backtesting mode.
+                    if not self.is_backtesting and (datetime.now(IST) - candle.time).total_seconds() > 300:
+                        # Ignore holds and check strategy-specific rate limits
+                        pass
+                    if fo_signal.signal != Direction.HOLD and not self._is_rate_limited(symbol, fo_signal.strategy_name, candle.time):
+                        self.last_signal_times[(symbol, fo_signal.strategy_name)] = candle.time
+                        
+                        is_futures = "_FUT" in fo_signal.strategy_name or symbol == "NIFTY_FUT"
+                        global_key = "GLOBAL_FUT" if is_futures else "GLOBAL_OPT"
+                        self.last_signal_times[(symbol, global_key)] = candle.time
+                        
+                        await self._process_and_enter(fo_signal, candle)
 
         # Mandatory EOD Square-off from config (targeting 15:00 IST)
         # Rule: Only trigger square-off if NOT seeding/backfilling and it's the current day
@@ -284,50 +325,30 @@ class MarketSimulator:
                 if not hasattr(self, "_eod_squared_date") or self._eod_squared_date != eod_date:
                     self._eod_squared_date = eod_date
                     print(f"🕒 EOD Boundary Hit at {candle.time}")
-                    if self.trader.open_positions:
+                    if self.trader.open_positions or self.futures_trader.open_positions:
                         prices = {s: self.candles[s][-1].close for s in self.candles if self.candles[s]}
-                        await self.trader.force_close_all(prices, candle.time, "EOD_SQUAREOFF")
+                        if self.trader.open_positions:
+                            await self.trader.force_close_all(prices, candle.time, "EOD_SQUAREOFF")
+                        if self.futures_trader.open_positions:
+                            fut_prices = prices.copy()
+                            fut_prices["NIFTY_FUT"] = prices.get("NIFTY", 0.0)
+                            await self.futures_trader.force_close_all(fut_prices, candle.time, "EOD_SQUAREOFF")
             return  # Stop processing further (no new entries)
 
         # Only process signals for trading symbols
         if symbol not in self.config.trading_symbols:
             return
 
-        interval_mins = int(self.config.risk.get("timeframe_mins", 15))
-        if not self._is_timeframe_boundary(candle.time, interval_mins):
+        # Confluence-based signal generation at timeframe boundary
+        if not is_boundary or candles_agg is None:
             return
 
-        if len(self.candles[symbol]) < (interval_mins * 2): # Ensure enough data
-            return
+        if boundary_snapshot:
+            self.latest_indicators[symbol] = boundary_snapshot
+            training_logger.log_snapshot(boundary_snapshot)
+            options_logger.log_options_state(boundary_snapshot)
 
-        # Build the aggregated candle
-        candles_agg = self._aggregate_candles(symbol, interval_mins)
-
-        weights = self.config.indicator_weights.get(symbol, {})
-        indicators = compute_snapshot_indicators(candles_agg, weights)
-
-        # Update RegimeDetector with latest vol/trend metrics
-        vix_val = self.candles.get("INDIAVIX")[-1].close if self.candles.get("INDIAVIX") else 16.0
-        atr_val = indicators.get("atr").value if indicators.get("atr") else 0.0
-        adx_val = indicators.get("adx").value if indicators.get("adx") else 0.0
-        self.regime_detectors[symbol].update(candle.time, vix_val, atr_val, adx_val)
-        regime_summary = self.regime_detectors[symbol].summary()
-
-        snapshot = IndicatorSnapshot(
-            instrument=symbol,
-            timeframe=f"{interval_mins}m",
-            candle_time=candle.time,
-            price=candle.close,
-            indicators=indicators,
-            confluence_score=score(indicators),
-            higher_timeframe=self._higher_timeframe(symbol),
-            market_context=self._get_market_context(),
-            options_data=self._get_options_data(symbol),
-            regime_info=regime_summary,
-        )
-        self.latest_indicators[symbol] = snapshot
-        training_logger.log_snapshot(snapshot)
-        options_logger.log_options_state(snapshot)
+        snapshot = self.latest_indicators[symbol]
         
         signal = await self.signal_engine.generate(snapshot, candles_agg)
         
@@ -366,7 +387,9 @@ class MarketSimulator:
                 pass
             else:
                 self.last_signal_times[(symbol, "CONFLUENCE")] = candle.time
-                self.last_signal_times[(symbol, "GLOBAL")] = candle.time
+                is_futures = symbol == "NIFTY_FUT"
+                global_key = "GLOBAL_FUT" if is_futures else "GLOBAL_OPT"
+                self.last_signal_times[(symbol, global_key)] = candle.time
                 await self._process_and_enter(signal, candle)
 
     def _is_rate_limited(self, symbol: str, strategy: str, now: datetime) -> bool:
@@ -383,11 +406,15 @@ class MarketSimulator:
                 return dt.replace(tzinfo=None)
             return dt
 
-        # 1. Global Cooldown Check (15 mins)
-        last_global = self.last_signal_times.get((symbol, "GLOBAL"))
+        # Separate global rate limits for futures and options
+        is_futures = "_FUT" in strategy or symbol == "NIFTY_FUT"
+        global_key = (symbol, "GLOBAL_FUT") if is_futures else (symbol, "GLOBAL_OPT")
+
+        # 1. Global Cooldown Check (10 mins)
+        last_global = self.last_signal_times.get(global_key)
         if last_global:
             lg = ensure_tz(last_global, now)
-            if (now - lg).total_seconds() < 900:
+            if (now - lg).total_seconds() < 600:
                 return True
 
         # 2. Per-Strategy Check
@@ -581,17 +608,74 @@ class MarketSimulator:
         return bars
 
     def snapshot(self) -> DashboardSnapshot:
+        # Combine open positions (options + futures)
+        options_open = list(self.trader.open_positions.values())
+        futures_open = [t.to_paper_trade() for t in self.futures_trader.open_positions.values()]
+        open_positions = options_open + futures_open
+
+        # Combine closed trades (options + futures)
+        options_closed = self.trader.closed_trades
+        futures_closed = [t.to_paper_trade() for t in self.futures_trader.closed_trades]
+        combined_closed = sorted(
+            options_closed + futures_closed,
+            key=lambda t: t.exit_time or t.entry_time
+        )
+        closed_trades = combined_closed[-50:]
+
+        # Recalculate combined metrics
+        closed = options_closed + futures_closed
+        wins = [trade for trade in closed if trade.pnl > 0]
+        losses = [abs(trade.pnl) for trade in closed if trade.pnl < 0]
+        gross_profit = sum(trade.pnl for trade in wins)
+        gross_loss = sum(losses)
+
+        total_invested = sum(trade.entry_price * trade.quantity for trade in closed)
+        total_invested += sum(trade.entry_price * trade.quantity for trade in open_positions)
+
+        realized_pnl = sum(trade.pnl for trade in closed)
+        open_pnl = sum(trade.pnl for trade in open_positions)
+
+        total_recovered = total_invested - sum(trade.entry_price * trade.quantity for trade in open_positions) + realized_pnl
+
+        realized_pnl_pct = round((realized_pnl / total_invested) * 100, 2) if total_invested > 0 else 0.0
+        open_pnl_pct = round((open_pnl / total_invested) * 100, 2) if total_invested > 0 else 0.0
+
+        instruments = {}
+        for symbol in set(t.instrument for t in (closed + open_positions)):
+            inst_closed = [t for t in closed if t.instrument == symbol]
+            inst_wins = [t for t in inst_closed if t.pnl > 0]
+            instruments[symbol] = {
+                "trades": len(inst_closed),
+                "win_rate": round((len(inst_wins) / len(inst_closed)) * 100, 2) if inst_closed else 0.0,
+                "pnl": round(sum(t.pnl for t in inst_closed), 2),
+                "invested": round(sum(t.entry_price * t.quantity for t in inst_closed), 2),
+                "open_pnl": round(sum(t.pnl for t in open_positions if t.instrument == symbol), 2)
+            }
+
+        metrics = {
+            "total_trades": float(len(closed)),
+            "win_rate": round((len(wins) / len(closed)) * 100, 2) if closed else 0.0,
+            "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss else gross_profit,
+            "realized_pnl": round(realized_pnl, 2),
+            "realized_pnl_pct": realized_pnl_pct,
+            "open_pnl": round(open_pnl, 2),
+            "open_pnl_pct": open_pnl_pct,
+            "total_invested": round(total_invested, 2),
+            "total_recovered": round(total_recovered, 2),
+            "instruments": instruments
+        }
+
         return DashboardSnapshot(
             market_time=datetime.now(IST),
             feed_health=self.feed_health,
             signals=self.signals[:30],
-            open_positions=list(self.trader.open_positions.values()),
-            closed_trades=self.trader.closed_trades[-50:],
+            open_positions=open_positions,
+            closed_trades=closed_trades,
             equity_curve=self.equity_curve[-120:],
             market_data_history={s: list(h) for s, h in self.market_data_history.items()},
             latest_indicators=self.latest_indicators,
-            metrics=self.trader.metrics(),
-            kill_switch_enabled=self.trader.kill_switch_enabled,
+            metrics=metrics,
+            kill_switch_enabled=self.trader.kill_switch_enabled or self.futures_trader.kill_switch,
         )
 
     def reset_runtime_state(self, keep_candles: bool = False) -> None:

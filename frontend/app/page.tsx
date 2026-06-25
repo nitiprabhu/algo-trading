@@ -15,6 +15,26 @@ import type { DashboardSnapshot } from "../lib/types";
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:7070";
 const WS_URL = API_URL.replace("http", "ws");
 
+const formatSymbol = (sym: string) => {
+  if (sym.includes(":")) {
+    const [strat, inst] = sym.split(":");
+    return {
+      strategy: strat.replace(/_/g, " "),
+      instrument: inst.replace(/_/g, " ")
+    };
+  }
+  if (sym.endsWith("_FUT") || sym.endsWith("_FUT_FUT") || sym.includes("FUT")) {
+    return {
+      strategy: "FUTURES",
+      instrument: sym.replace(/_FUT(_FUT)?$/, "").replace(/_/g, " ")
+    };
+  }
+  return {
+    strategy: "OPTIONS",
+    instrument: sym.replace(/_/g, " ")
+  };
+};
+
 export default function DashboardPage() {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
   const [wsLive, setWsLive] = useState(false);
@@ -295,54 +315,66 @@ export default function DashboardPage() {
         </section>
 
         {/* --- SECTION 1: LIVE OPERATIONS CENTER --- */}
-        <div className="section-header span3" style={{ borderBottom: '2px solid var(--accent)', marginBottom: '1rem', marginTop: '2rem' }}>
-          <h2 style={{ fontSize: '1.2rem', textTransform: 'uppercase', letterSpacing: '1px' }}>⚡ Live Operations Center</h2>
+        <div className="section-header">
+          <h2>⚡ Live Operations Center</h2>
         </div>
-        <IndicatorPanel snapshots={snapshot.latest_indicators || {}} />
         <SignalFeed signals={snapshot.signals || []} />
+        <IndicatorPanel snapshots={snapshot.latest_indicators || {}} />
 
         {/* --- SECTION 2: PORTFOLIO & POSITIONS --- */}
-        <div className="section-header span3" style={{ borderBottom: '2px solid var(--accent)', marginBottom: '1rem', marginTop: '2.5rem' }}>
-          <h2 style={{ fontSize: '1.2rem', textTransform: 'uppercase', letterSpacing: '1px' }}>💼 Active Portfolio</h2>
+        <div className="section-header">
+          <h2>💼 Active Portfolio</h2>
         </div>
         <PositionsPanel trades={snapshot.open_positions || []} />
         
-        <section className="panel span3">
+        <section className="panel">
           <div className="panelHeader">
             <h2>Instrument Breakdown</h2>
           </div>
-          <div className="instrumentGrid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "1rem" }}>
-            {Object.entries(metrics.instruments || {}).map(([symbol, stats]: [string, any]) => (
-              <div key={symbol} className="instrumentCard" style={{ padding: "1rem", borderRadius: "8px", border: "1px solid rgba(255,255,255,0.1)", background: "rgba(255,255,255,0.02)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.5rem" }}>
-                  <h3 style={{ margin: 0, fontSize: "1rem", color: "var(--accent)" }}>{symbol}</h3>
-                  <span style={{ fontSize: "0.8rem", opacity: 0.6 }}>{stats.trades} Trades</span>
+          <div className="instrumentGrid">
+            {Object.entries(metrics.instruments || {}).map(([symbol, stats]: [string, any]) => {
+              const info = formatSymbol(symbol);
+              return (
+                <div key={symbol} className="instrumentCard">
+                  <div style={{ display: "flex", flexDirection: "column", gap: "2px", marginBottom: "0.75rem", borderBottom: "1px solid rgba(255,255,255,0.05)", paddingBottom: "0.5rem" }}>
+                    <span style={{ fontSize: "0.65rem", opacity: 0.5, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                      {info.strategy}
+                    </span>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "8px" }}>
+                      <h3 style={{ margin: 0, fontSize: "0.9rem", fontWeight: 600, color: "var(--accent)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={info.instrument}>
+                        {info.instrument}
+                      </h3>
+                      <span style={{ fontSize: "0.75rem", opacity: 0.6, whiteSpace: "nowrap" }}>
+                        {stats.trades} Trades
+                      </span>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
+                    <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Win Rate</span>
+                    <span style={{ fontSize: "0.8rem", fontWeight: "bold" }}>{stats.win_rate}%</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
+                    <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Investment</span>
+                    <span style={{ fontSize: "0.8rem", fontWeight: "bold", opacity: 0.8 }}>₹{stats.invested?.toLocaleString() ?? "0"}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>Net P&L</span>
+                    <span style={{ fontSize: "0.8rem", fontWeight: "bold", color: (stats.pnl ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
+                      {(stats.pnl ?? 0) >= 0 ? "+" : ""}₹{(stats.pnl ?? 0).toFixed(2)}
+                    </span>
+                  </div>
                 </div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
-                  <span style={{ fontSize: "0.8rem" }}>Win Rate</span>
-                  <span style={{ fontSize: "0.8rem", fontWeight: "bold" }}>{stats.win_rate}%</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.25rem" }}>
-                  <span style={{ fontSize: "0.8rem" }}>Investment</span>
-                  <span style={{ fontSize: "0.8rem", fontWeight: "bold", opacity: 0.8 }}>₹{stats.invested?.toLocaleString() ?? "0"}</span>
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span style={{ fontSize: "0.8rem" }}>Net P&L</span>
-                  <span style={{ fontSize: "0.8rem", fontWeight: "bold", color: (stats.pnl ?? 0) >= 0 ? "var(--gain)" : "var(--loss)" }}>
-                    {(stats.pnl ?? 0) >= 0 ? "+" : ""}₹{(stats.pnl ?? 0).toFixed(2)}
-                  </span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
 
         {/* --- SECTION 3: AUDIT & PERFORMANCE --- */}
-        <div className="section-header span3" style={{ borderBottom: '2px solid var(--accent)', marginBottom: '1rem', marginTop: '2.5rem' }}>
-          <h2 style={{ fontSize: '1.2rem', textTransform: 'uppercase', letterSpacing: '1px' }}>📜 Performance Audit Trail</h2>
+        <div className="section-header">
+          <h2>📜 Performance Audit Trail</h2>
         </div>
-        <DailyHistory />
         <TradeLog trades={snapshot.closed_trades || []} />
+        <DailyHistory />
       </section>
     </main>
     </>

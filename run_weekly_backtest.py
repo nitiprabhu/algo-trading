@@ -37,8 +37,8 @@ async def main():
     
     # Initialize runtime
     runtime = IndstocksMarketRuntime(config, skip_db_load=True)
-    start = datetime(2026, 6, 16, 9, 0, tzinfo=IST)
-    end = datetime(2026, 6, 25, 15, 30, tzinfo=IST)
+    start = datetime(2026, 6, 1, 9, 0, tzinfo=IST)
+    end = datetime(2026, 6, 15, 15, 30, tzinfo=IST)
     
     print("=" * 60)
     print(f"🚀 STARTING WEEKLY BACKTEST FROM {start.date()} TO {end.date()}")

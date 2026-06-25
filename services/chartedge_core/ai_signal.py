@@ -11,7 +11,7 @@ import httpx
 
 from services.chartedge_core.confluence import consideration
 from services.chartedge_core.models import Candle, Direction, EntryZone, IndicatorSnapshot, Signal
-from services.chartedge_core.strategies import EagleNiftyT315, FiveEMAScalping, NiftyFuturesORB, IronCondorStrategy
+from services.chartedge_core.strategies import EagleNiftyT315, FiveEMAScalping, NiftyFuturesORB, IronCondorStrategy, VWAPReversionStrategy
 
 
 class AIProvider(ABC):
@@ -254,6 +254,7 @@ class SignalEngine:
                 "ema5": FiveEMAScalping(),
                 "fut_orb": NiftyFuturesORB(),
                 "iron_condor": IronCondorStrategy(),   # SELL premium in VIX≤14 range markets
+                "vwap_rev": VWAPReversionStrategy(),   # SELL/BUY reversion in chop markets
             }
         
         strategies = self.strategies[symbol]
@@ -266,6 +267,7 @@ class SignalEngine:
         strategies["ema5"].update(candle, candles)
         strategies["fut_orb"].update(candle)
         strategies["iron_condor"].update(candle)
+        strategies["vwap_rev"].update(candle)
 
         # 3. Check for triggers (T315 uses updated state)
         t315_trigger = strategies["t315"].get_signal(candle, india_vix)
@@ -291,12 +293,16 @@ class SignalEngine:
 
         # 4. Iron Condor — sell premium when VIX≤14 + range-bound (NIFTY only)
         condor_trigger = None
+        vwap_rev_trigger = None
         if symbol == "NIFTY":
             condor_trigger = strategies["iron_condor"].get_signal(
                 candle, india_vix, spot=candle.close
             )
+            vwap_rev_trigger = strategies["vwap_rev"].get_signal(
+                candle, india_vix, vwap=vwap_val, adx=adx_val
+            )
 
-        trigger = t315_trigger or ema5_trigger or fut_orb_trigger or condor_trigger
+        trigger = t315_trigger or ema5_trigger or fut_orb_trigger or condor_trigger or vwap_rev_trigger
 
         if not trigger:
             # Periodic health check print (every 5 mins per instrument)
@@ -306,7 +312,8 @@ class SignalEngine:
                     f"No Trigger (T315: {'YES' if t315_trigger else 'NO'}, "
                     f"5EMA: {'YES' if ema5_trigger else 'NO'}, "
                     f"FUT_ORB: {'YES' if fut_orb_trigger else 'NO'}, "
-                    f"CONDOR: {'YES' if condor_trigger else 'NO'})"
+                    f"CONDOR: {'YES' if condor_trigger else 'NO'}, "
+                    f"VWAP: {'YES' if vwap_rev_trigger else 'NO'})"
                 )
             return None
 

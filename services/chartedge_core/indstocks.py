@@ -593,7 +593,7 @@ class IndstocksMarketRuntime(MarketSimulator):
                 # If we have passed the square-off time (e.g. 15:00 IST)
                 if now.hour > sq_hour or (now.hour == sq_hour and now.minute >= sq_min):
                     if not self.is_seeding and not self.is_backtesting:
-                        if self.trader.open_positions:
+                        if self.trader.open_positions or self.futures_trader.open_positions:
                             print(f"🕒 EOD Wall-Clock Watchdog: EOD Boundary Hit at system time {now.strftime('%H:%M:%S')}")
                             prices = {}
                             for symbol in self.config.trading_symbols:
@@ -604,7 +604,13 @@ class IndstocksMarketRuntime(MarketSimulator):
                                 else:
                                     prices[symbol] = 0.0
                                     
-                            await self.trader.force_close_all(prices, now, "EOD_SQUAREOFF")
+                            if self.trader.open_positions:
+                                await self.trader.force_close_all(prices, now, "EOD_SQUAREOFF")
+                            if self.futures_trader.open_positions:
+                                # For futures, ensure NIFTY_FUT proxies spot price if available
+                                fut_prices = prices.copy()
+                                fut_prices["NIFTY_FUT"] = prices.get("NIFTY", 0.0)
+                                await self.futures_trader.force_close_all(fut_prices, now, "EOD_SQUAREOFF")
             except Exception as e:
                 print(f"❌ ERROR inside EOD Watchdog: {e}")
 

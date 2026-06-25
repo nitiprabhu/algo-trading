@@ -3,7 +3,7 @@ import type { IndicatorSnapshot } from "../lib/types";
 
 export function IndicatorPanel({ snapshots }: { snapshots: Record<string, IndicatorSnapshot> }) {
   return (
-    <section className="panel span2">
+    <section className="panel">
       <div className="panelHeader">
         <h2>Indicator Confluence</h2>
         <Gauge size={18} />

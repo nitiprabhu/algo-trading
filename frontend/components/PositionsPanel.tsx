@@ -3,7 +3,7 @@ import type { Trade } from "../lib/types";
 
 export function PositionsPanel({ trades }: { trades: Trade[] }) {
   return (
-    <section className="panel">
+    <section className="panel span2">
       <div className="panelHeader">
         <h2>Open Positions</h2>
         <BriefcaseBusiness size={18} />

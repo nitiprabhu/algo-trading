@@ -112,7 +112,7 @@ risk:
   max_signals_per_instrument_per_hour: 3
   confidence_floor: 60
   options_confidence_buffer: 5  # options require confidence_floor + this to filter theta-bleed entries
-  options_max_loss_pct: 25.0
+  options_max_loss_pct: 13.0
   options_trail_arm_pct: 15.0
   options_trail_keep_frac: 0.50
   cooldown_after_losses: 3      # tolerate 2 bad trades before pausing (was 2)

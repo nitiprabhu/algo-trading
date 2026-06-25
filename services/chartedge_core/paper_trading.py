@@ -1,5 +1,6 @@
 from __future__ import annotations
 from uuid import UUID
+import asyncio
 from datetime import datetime, time
 from typing import Any, Optional
 
@@ -149,10 +150,11 @@ class PaperTradingEngine:
         # Options-specific time gates
         is_option_entry = any(x in signal.instrument for x in ("-CE", "-PE", "_CE", "_PE"))
         if is_option_entry:
-            # Hard rule: no options entries before 10:15 regardless of regime.
+            # Hard rule: no confluence options entries before 10:15.
             # Opening 60 mins have violent price discovery — options get whipsawed.
-            OPTIONS_OPEN_CUTOFF = time(10, 15)
-            if not is_strategy_signal and t < OPTIONS_OPEN_CUTOFF:
+            # Strategy signals (like T315) can enter from 09:50 to catch the actual breakout.
+            OPTIONS_OPEN_CUTOFF = time(9, 50) if is_strategy_signal else time(10, 15)
+            if t < OPTIONS_OPEN_CUTOFF:
                 return None
 
             # Late-entry gate: need at least theta_timeout_mins before EOD
@@ -484,7 +486,7 @@ class PaperTradingEngine:
         trade_instrument = signal.instrument
         self.open_positions[trade_instrument] = trade
         if not self.is_backtesting:
-            persist_trade_entry(trade)
+            await asyncio.to_thread(persist_trade_entry, trade)
             # Log to realtime/trades_YYYY-MM-DD.log
             log_msg = (
                 f"🚀 TRADE ENTERED\n\n"
@@ -508,7 +510,7 @@ class PaperTradingEngine:
                 save_trade_legs_to_cache(str(trade.id), trade.legs)
 
             # Send Telegram Alert asynchronously
-            import asyncio
+            
             from services.chartedge_core.telegram import notifier
             display_inst = trade.instrument
             import re
@@ -538,7 +540,7 @@ class PaperTradingEngine:
                 msg += "\n"
             msg += f"🧠 *Reason:* {signal.reasoning or 'No reason provided.'}"
             asyncio.create_task(notifier.send_message(msg))
-        training_logger.log_entry(trade, signal)
+        await asyncio.to_thread(training_logger.log_entry, trade, signal)
         return trade
 
     async def mark_to_market(self, candle: Candle, snapshot: IndicatorSnapshot | None = None, ltp_map: dict[str, float] | None = None) -> None:
@@ -653,7 +655,8 @@ class PaperTradingEngine:
 
             if hasattr(trade, "last_db_update") and trade.last_db_update is not None:
                 if not self.is_backtesting and (datetime.now() - trade.last_db_update).seconds > 60:
-                    update_trade_mtm(
+                    await asyncio.to_thread(
+                        update_trade_mtm,
                         str(trade.id), 
                         trade.pnl, 
                         trade.pnl_pct, 
@@ -672,6 +675,12 @@ class PaperTradingEngine:
             # 2. Expiry Day Hard Exit (configured per instrument; default: Tuesday for NIFTY, Thursday for rest)
             if self._is_expiry_day(trade.instrument, candle.time) and candle.time.hour >= 14:
                 await self._close(trade, current_price, candle.time, "EXPIRY_HARD_EXIT")
+                continue
+                
+            # 2b. Hard Exit options before 14:45 if T1 not hit
+            is_option_pos = ":" in trade.instrument or any(x in trade.instrument for x in ("-CE", "-PE", "_CE", "_PE"))
+            if is_option_pos and not trade.t1_hit and candle.time.time() >= time(14, 45):
+                await self._close(trade, current_price, candle.time, "AFTERNOON_THETA_EXIT")
                 continue
 
             # 4a. Hard max-loss guard: exit if premium down >13% (catastrophe guard, not regular SL).
@@ -732,18 +741,20 @@ class PaperTradingEngine:
                     
                     # Percentage-of-peak trail: once a run is established (>=12% MFE),
                     # lock in a configurable fraction of the highest unrealized gain.
-                    # MFE data showed winners peaking at +20/40% then reversing in one
-                    # synthetic 15-min step and giving back ~45% of peak under the old
-                    # coarse ladder. Locking a fixed fraction keeps more of each runner
-                    # while still leaving room above the lock for trend continuation.
-                    trail_keep = self.risk_config.get("options_trail_keep_frac", 0.65)
-                    trail_arm = self.risk_config.get("options_trail_arm_pct", 12.0)
-                    if trade.highest_pnl_pct >= trail_arm:
-                        locked_pct = trade.highest_pnl_pct * trail_keep
+                    arm_pct = self.risk_config.get("options_trail_arm_pct", 10.0)
+                    if trade.highest_pnl_pct >= arm_pct:
+                        keep_frac = self.risk_config.get("options_trail_keep_frac", 0.60)
+                        
+                        # Theta-decay acceleration: After 12:30 PM, options decay much faster.
+                        # Reduce the keep fraction to lock in more profit and tighten the stop.
+                        if candle.time.time() >= time(12, 30):
+                            keep_frac = min(keep_frac, 0.50)
+                            
+                        locked_pct = trade.highest_pnl_pct * keep_frac
                         new_sl = round(trade.entry_price * (1 + locked_pct / 100), 2)
                         if new_sl > trade.sl_price:
                             trade.sl_price = new_sl
-                            print(f"📈 Peak-trail SL (+{locked_pct:.1f}%, {trail_keep:.0%} of peak {trade.highest_pnl_pct:.1f}%): {trade.sl_price} for {trade.instrument}")
+                            print(f"📈 Peak-trail SL (+{locked_pct:.1f}%, {keep_frac:.0%} of peak {trade.highest_pnl_pct:.1f}%): {trade.sl_price} for {trade.instrument}")
                 elif trade.direction == Direction.SELL:
                     if trade.highest_pnl_pct >= 8.0 and not trade.t1_hit:
                         trade.t1_hit = True
@@ -751,14 +762,17 @@ class PaperTradingEngine:
                             trade.sl_price = trade.entry_price
                             print(f"🛡️ Cost lock trailing SL: {trade.sl_price} for {trade.instrument} (Highest PnL: {trade.highest_pnl_pct}%)")
                     
-                    trail_keep = self.risk_config.get("options_trail_keep_frac", 0.65)
-                    trail_arm = self.risk_config.get("options_trail_arm_pct", 12.0)
-                    if trade.highest_pnl_pct >= trail_arm:
-                        locked_pct = trade.highest_pnl_pct * trail_keep
+                    arm_pct = self.risk_config.get("options_trail_arm_pct", 10.0)
+                    if trade.highest_pnl_pct >= arm_pct:
+                        keep_frac = self.risk_config.get("options_trail_keep_frac", 0.60)
+                        if candle.time.time() >= time(12, 30):
+                            keep_frac = min(keep_frac, 0.50)
+                            
+                        locked_pct = trade.highest_pnl_pct * keep_frac
                         new_sl = round(trade.entry_price * (1 - locked_pct / 100), 2)
                         if new_sl < trade.sl_price:
                             trade.sl_price = new_sl
-                            print(f"📈 Peak-trail SL (-{locked_pct:.1f}%, {trail_keep:.0%} of peak {trade.highest_pnl_pct:.1f}%): {trade.sl_price} for {trade.instrument}")
+                            print(f"📈 Peak-trail SL (-{locked_pct:.1f}%, {keep_frac:.0%} of peak {trade.highest_pnl_pct:.1f}%): {trade.sl_price} for {trade.instrument}")
             else:
                 if trade.highest_pnl_pct >= 20.0:
                     steps = int((trade.highest_pnl_pct - 20) / 10)
@@ -947,7 +961,7 @@ class PaperTradingEngine:
             self.consecutive_losses = 0
             self.cooldown_until = None
         if not self.is_backtesting:
-            persist_trade_exit(trade)
+            await asyncio.to_thread(persist_trade_exit, trade)
             # Log to realtime/trades_YYYY-MM-DD.log
             emoji = "🟢" if trade.pnl >= 0 else "🔴"
             log_msg = (
@@ -968,7 +982,6 @@ class PaperTradingEngine:
             log_realtime_trade_action(log_msg)
 
             # Send Telegram Alert asynchronously
-            import asyncio
             from services.chartedge_core.telegram import notifier
             display_inst = trade.instrument
             import re
@@ -996,7 +1009,7 @@ class PaperTradingEngine:
                 msg += "\n"
             msg += f"💵 *Invested Amount:* `₹{trade.invested_amount:.2f}`"
             asyncio.create_task(notifier.send_message(msg))
-        training_logger.log_exit(trade)
+        await asyncio.to_thread(training_logger.log_exit, trade)
 
     def _underlying_side(self, instrument: str) -> tuple[str, str | None]:
         """Extract (underlying, option_type) e.g. NIFTY-Jun2026-23800-PE → ('NIFTY', 'PE')."""

@@ -12,6 +12,7 @@ Key differences from the options PaperTradingEngine:
   - Hard EOD exit at 15:10 IST
 """
 from __future__ import annotations
+import asyncio
 
 import asyncio
 from datetime import datetime, timedelta, time
@@ -197,16 +198,22 @@ class FuturesTradingEngine:
             t2 = round(entry_price + sl_distance * 3.0 if direction == Direction.BUY else entry_price - sl_distance * 3.0, 2)
             return sl, t1, t2
 
+        atr = signal.indicator_snapshot.indicators.get("atr")
+        if atr and isinstance(atr.value, float):
+            dynamic_sl_dist = min(max(atr.value * 1.2, 30.0), 80.0)
+        else:
+            dynamic_sl_dist = self.sl_points
+
         if direction == Direction.BUY:
             return (
-                round(entry_price - self.sl_points, 2),
-                round(entry_price + self.t1_points, 2),
-                round(entry_price + self.t2_points, 2),
+                round(entry_price - dynamic_sl_dist, 2),
+                round(entry_price + (dynamic_sl_dist * 1.5), 2),
+                round(entry_price + (dynamic_sl_dist * 3.0), 2),
             )
         return (
-            round(entry_price + self.sl_points, 2),
-            round(entry_price - self.t1_points, 2),
-            round(entry_price - self.t2_points, 2),
+            round(entry_price + dynamic_sl_dist, 2),
+            round(entry_price - (dynamic_sl_dist * 1.5), 2),
+            round(entry_price - (dynamic_sl_dist * 3.0), 2),
         )
 
     # ─────────────────────────── Entry ────────────────────────────────────────
@@ -236,16 +243,15 @@ class FuturesTradingEngine:
         margin_pct = 0.12 if "BANKNIFTY" in signal.instrument.upper() else 0.11
         required_margin = entry_price * (self.lot_size * self.max_lots) * margin_pct
 
-        # 1. Mutual Exclusion / Focus Rule Check
-        has_active_options = False
+        # 1. Calculate used options outlay for margin, and check mutual exclusion if enabled
         used_options_outlay = 0.0
+        has_active_options = False
         if hasattr(self, "simulator") and self.simulator:
             active_options = self.simulator.trader.open_positions
-            if len(active_options) > 0:
-                has_active_options = True
             used_options_outlay = sum(p.invested_amount for p in active_options.values())
-
-        if has_active_options:
+            has_active_options = len(active_options) > 0
+            
+        if self.risk_config.get("mutual_exclusion", False) and has_active_options:
             print(f"⛔ [Futures Margin Gate] {signal.instrument}: Blocked futures entry because there is an active Options position (Mutual Exclusion)")
             return None
 
@@ -285,7 +291,7 @@ class FuturesTradingEngine:
         )
 
         if not self.is_backtesting:
-            persist_trade_entry(trade.to_paper_trade())
+            await asyncio.to_thread(persist_trade_entry, trade.to_paper_trade())
             # Log to realtime/trades_YYYY-MM-DD.log
             log_msg = (
                 f"🚀 FUTURES ENTERED\n\n"
@@ -357,12 +363,24 @@ class FuturesTradingEngine:
 
             # ── 4. Supertrend Trailing SL (index-point space — safe for futures) ──
             if supertrend_value is not None and isinstance(supertrend_value, (int, float)):
+                # Time-based acceleration: if held > 60m, trail more aggressively
+                held_mins = (candle.time - trade.entry_time).total_seconds() / 60.0
+                
                 if trade.direction == Direction.BUY and supertrend_value > trade.sl_price:
-                    print(f"📈 [Futures] Supertrend trail SL: {trade.sl_price} → {supertrend_value:.2f}")
-                    trade.sl_price = round(supertrend_value, 2)
+                    new_sl = supertrend_value
+                    if held_mins > 60:
+                        # Ratchet minimum: half distance between entry and supertrend
+                        midpoint = trade.entry_price + (supertrend_value - trade.entry_price) * 0.5
+                        new_sl = max(supertrend_value, midpoint)
+                    print(f"\U0001f4c8 [Futures] Supertrend trail SL: {trade.sl_price} → {new_sl:.2f}")
+                    trade.sl_price = round(new_sl, 2)
                 elif trade.direction == Direction.SELL and supertrend_value < trade.sl_price:
-                    print(f"📉 [Futures] Supertrend trail SL: {trade.sl_price} → {supertrend_value:.2f}")
-                    trade.sl_price = round(supertrend_value, 2)
+                    new_sl = supertrend_value
+                    if held_mins > 60:
+                        midpoint = trade.entry_price - (trade.entry_price - supertrend_value) * 0.5
+                        new_sl = min(supertrend_value, midpoint)
+                    print(f"\U0001f4c9 [Futures] Supertrend trail SL: {trade.sl_price} → {new_sl:.2f}")
+                    trade.sl_price = round(new_sl, 2)
 
             # ── 5. Target 1 → Move SL to Breakeven ────────────────────────
             if not trade.t1_hit:
@@ -448,7 +466,7 @@ class FuturesTradingEngine:
             self.cooldown_until = None
 
         if not self.is_backtesting:
-            persist_trade_exit(trade.to_paper_trade())
+            await asyncio.to_thread(persist_trade_exit, trade.to_paper_trade())
             # Log to realtime/trades_YYYY-MM-DD.log
             emoji = "🟢" if trade.pnl >= 0 else "🔴"
             log_msg = (

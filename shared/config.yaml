@@ -105,17 +105,18 @@ ai:
   max_tokens: 500
 
 risk:
-  total_capital: 200000
-  notional_per_trade: 200000
+  total_capital: 500000
+  notional_per_trade: 500000
   max_open_positions: 2
+  mutual_exclusion: false
   max_signals_per_instrument_per_hour: 3
   confidence_floor: 60
   options_confidence_buffer: 5  # options require confidence_floor + this to filter theta-bleed entries
-  options_max_loss_pct: 10.0    # tightened to cut losses faster in chop
-  options_trail_arm_pct: 15.0   # arm peak-trail once unrealized gain reaches this %
-  options_trail_keep_frac: 0.70 # lock this fraction of peak MFE as trailed SL
-  cooldown_after_losses: 2      # cooldown window after N consecutive same-day losses (was 3)
-  daily_halt_after_losses: 4    # halt all new entries for the day after N consecutive losses (was 7)
+  options_max_loss_pct: 25.0
+  options_trail_arm_pct: 15.0
+  options_trail_keep_frac: 0.50
+  cooldown_after_losses: 3      # tolerate 2 bad trades before pausing (was 2)
+  daily_halt_after_losses: 5    # with 2L capital, 4 was too tight (was 4)
   trade_only_trending: true     # prior-day regime gate to block chop days
   options_directional_filter: false # DISABLED — tested Mar+Apr+May deterministically: option entries are already
                                     # trend-aligned by confluence (every CE has ema50>ema200), so a directional veto
@@ -124,7 +125,7 @@ risk:
   dir_filter_min_sep_pct: 0.10
   options_min_trend_sep_pct: 0.10
   strategy_adx_gate: true       # apply intraday ADX trend gate to 5EMA/T315 strategy scalps
-  adx_min_trend: 30.0           # min ADX for an entry — above 30 indicates strong trend, filters chop
+  adx_min_trend: 30.0           # ADX >= 30 = strong trend; 22 allowed too many chop trades
   daily_drawdown_pause_pct: 2.5
   stale_feed_seconds: 60
   price_deviation_guard_pct: 5.0
@@ -143,7 +144,7 @@ risk:
 futures_risk:
   NIFTY_FUT:
     lot_size: 75
-    max_lots: 1
+    max_lots: 2
     sl_points: 50
     target_1_points: 75
     target_2_points: 150

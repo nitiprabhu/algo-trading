@@ -37,10 +37,8 @@ async def main():
     
     # Initialize runtime
     runtime = IndstocksMarketRuntime(config, skip_db_load=True)
-    
-    # Define time range: May 1st to May 8th, 2026
-    start = datetime(2026, 5, 1, 9, 0, tzinfo=IST)
-    end = datetime(2026, 5, 8, 15, 30, tzinfo=IST)
+    start = datetime(2026, 6, 16, 9, 0, tzinfo=IST)
+    end = datetime(2026, 6, 25, 15, 30, tzinfo=IST)
     
     print("=" * 60)
     print(f"🚀 STARTING WEEKLY BACKTEST FROM {start.date()} TO {end.date()}")
@@ -49,13 +47,15 @@ async def main():
     print("=" * 60)
     
     # Run backtest
-    results = await runtime.run_backtest(start, end)
+    results = await runtime.run_backtest(start, end, run_regime_agent=True)
     
     if results.get("status") == "error":
-        print(f"❌ Backtest failed: {results.get('reason')}")
+        print(f"❌ Backtest failed: {results}")
         sys.exit(1)
         
-    closed_trades = runtime.trader.closed_trades
+    closed_trades = runtime.trader.closed_trades + [
+        t.to_paper_trade() for t in runtime.futures_trader.closed_trades
+    ]
     
     print("\n" + "="*60)
     print("🏁 BACKTEST COMPLETE")
@@ -71,11 +71,15 @@ async def main():
         for idx, t in enumerate(sorted(closed_trades, key=lambda x: x.entry_time), 1):
             entry_str = t.entry_time.astimezone(IST).strftime("%m-%d %H:%M")
             exit_str = t.exit_time.astimezone(IST).strftime("%m-%d %H:%M") if t.exit_time else "Open"
-            direction_str = "PE" if "-PE" in t.instrument or "_PE" in t.instrument else "CE"
+            if "FUT" in t.instrument:
+                type_str = f"FUT {t.direction.value}"
+            else:
+                opt_type = "PE" if "-PE" in t.instrument or "_PE" in t.instrument else "CE"
+                type_str = f"OPT {opt_type}"
             rows.append([
                 idx,
                 t.instrument,
-                direction_str,
+                type_str,
                 entry_str,
                 exit_str,
                 f"{t.entry_price:.2f}",
@@ -92,30 +96,40 @@ async def main():
     while current <= end.date():
         # Exclude weekends from breakdown
         if current.weekday() < 5:
-            daily_pnl[current] = {"pnl": 0.0, "trades": 0}
+            daily_pnl[current] = {"pnl": 0.0, "opt_pnl": 0.0, "fut_pnl": 0.0, "trades": 0}
         current = datetime.combine(current, datetime.min.time()).date() + sys.modules['datetime'].timedelta(days=1)
         
     for t in closed_trades:
         t_date = t.entry_time.astimezone(IST).date()
         if t_date not in daily_pnl:
-            daily_pnl[t_date] = {"pnl": 0.0, "trades": 0}
+            daily_pnl[t_date] = {"pnl": 0.0, "opt_pnl": 0.0, "fut_pnl": 0.0, "trades": 0}
         daily_pnl[t_date]["pnl"] += t.pnl
+        if "FUT" in t.instrument:
+            daily_pnl[t_date]["fut_pnl"] += t.pnl
+        else:
+            daily_pnl[t_date]["opt_pnl"] += t.pnl
         daily_pnl[t_date]["trades"] += 1
         
     print("\n📅 DAILY PERFORMANCE BREAKDOWN:")
     breakdown_rows = []
     total_pnl = 0.0
+    total_opt = 0.0
+    total_fut = 0.0
     total_trades = 0
     for d, stats in sorted(daily_pnl.items()):
         total_pnl += stats["pnl"]
+        total_opt += stats["opt_pnl"]
+        total_fut += stats["fut_pnl"]
         total_trades += stats["trades"]
         breakdown_rows.append([
             d.strftime("%Y-%m-%d (%a)"),
             stats["trades"],
+            f"₹{stats['opt_pnl']:+.2f}",
+            f"₹{stats['fut_pnl']:+.2f}",
             f"₹{stats['pnl']:+.2f}"
         ])
-    breakdown_rows.append(["TOTAL", total_trades, f"₹{total_pnl:+.2f}"])
-    print(tabulate(breakdown_rows, headers=["Date", "Trades Count", "Net PnL"], tablefmt="grid"))
+    breakdown_rows.append(["TOTAL", total_trades, f"₹{total_opt:+.2f}", f"₹{total_fut:+.2f}", f"₹{total_pnl:+.2f}"])
+    print(tabulate(breakdown_rows, headers=["Date", "Trades Count", "Options PnL", "Futures PnL", "Net PnL"], tablefmt="grid"))
     
     # Key performance metrics
     print("\n📊 STRATEGY METRICS SUMMARY:")

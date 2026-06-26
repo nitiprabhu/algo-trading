@@ -358,6 +358,19 @@ class PaperTradingEngine:
         quantity = lots * lot_size
         invested_amount = round(entry_price * quantity, 2)
         
+        is_multi_leg = ":" in signal.instrument
+        strategy_name = getattr(signal, "strategy_name", "")
+        
+        # Calculate true margin required for options
+        required_margin = invested_amount
+        if is_multi_leg and strategy_name in ("IRON_CONDOR", "CREDIT_SPREAD", "SHORT_STRANGLE"):
+            # Option selling margin requirement (approx ₹1.2L per lot for BankNifty, ₹0.6L for Nifty with hedge)
+            if "BANKNIFTY" in inst_upper:
+                margin_per_lot = 60000 if strategy_name != "SHORT_STRANGLE" else 120000
+            else:
+                margin_per_lot = 50000 if strategy_name != "SHORT_STRANGLE" else 100000
+            required_margin = margin_per_lot * lots
+        
         # 1. Mutual Exclusion / Focus Rule Check
         has_active_futures = False
         used_futures_margin = 0.0
@@ -374,15 +387,26 @@ class PaperTradingEngine:
             return None
 
         # 2. Free Margin Check
-        used_options_outlay = sum(p.invested_amount for p in self.open_positions.values())
+        used_options_outlay = 0.0
+        for p in self.open_positions.values():
+            s_name = p.instrument.split(":")[0] if ":" in p.instrument else ""
+            if s_name in ("IRON_CONDOR", "CREDIT_SPREAD", "SHORT_STRANGLE"):
+                # Rough margin estimation for active selling positions
+                m_lot = 60000 if "BANKNIFTY" in p.instrument.upper() else 50000
+                qty = p.quantity / (15 if "BANKNIFTY" in p.instrument.upper() else 75)
+                used_options_outlay += m_lot * qty
+            else:
+                used_options_outlay += p.invested_amount
+
         free_margin = total_equity - used_options_outlay - used_futures_margin
         
-        if invested_amount > free_margin:
-            print(f"⛔ [Margin Gate] {signal.instrument}: Required premium outlay {invested_amount} exceeds free margin {free_margin:.2f} (Total Cap: {total_equity})")
+        if required_margin > free_margin:
+            print(f"⛔ [Margin Gate] {signal.instrument}: Required margin {required_margin} exceeds free margin {free_margin:.2f} (Total Cap: {total_equity})")
             return None
             
         # Final safety check against hard capital limit
-        if invested_amount > total_equity * 0.3: # Max 30% capital in one trade (even if risk is low)
+        if invested_amount > total_equity * 0.3 and not (is_multi_leg and strategy_name in ("IRON_CONDOR", "CREDIT_SPREAD", "SHORT_STRANGLE")): 
+            # Allow margin requirement to exceed 30%, but not premium outlay
             print(f"⚠️ Trade rejected: Invested amount ({invested_amount}) exceeds 30% capital buffer")
             return None
         # Options SL/T1/T2 must be in option-premium domain, not underlying domain.
@@ -679,7 +703,9 @@ class PaperTradingEngine:
                 
             # 2b. Hard Exit options before 14:45 if T1 not hit
             is_option_pos = ":" in trade.instrument or any(x in trade.instrument for x in ("-CE", "-PE", "_CE", "_PE"))
-            if is_option_pos and not trade.t1_hit and candle.time.time() >= time(14, 45):
+            s_name_aft = trade.instrument.split(":")[0] if ":" in trade.instrument else ""
+            is_selling_strategy_aft = s_name_aft in ("IRON_CONDOR", "CREDIT_SPREAD", "SHORT_STRANGLE")
+            if is_option_pos and not trade.t1_hit and candle.time.time() >= time(14, 45) and not is_selling_strategy_aft:
                 await self._close(trade, current_price, candle.time, "AFTERNOON_THETA_EXIT")
                 continue
 
@@ -714,19 +740,23 @@ class PaperTradingEngine:
                 continue
 
             # 4. Theta-Based Mitigation (regime-set timeout; extended by 30m if Supertrend still aligned)
-            theta_mins = self.risk_config.get("theta_timeout_mins", 45)
-            duration_mins = (t_candle - t_entry).total_seconds() / 60
-            if duration_mins > theta_mins and not trade.t1_hit:
-                st_trend_reversed = True  # default: close unless Supertrend confirms trend alive
-                if snapshot and "supertrend" in snapshot.indicators:
-                    st_vote = snapshot.indicators["supertrend"].vote
-                    if trade.direction == Direction.BUY and st_vote == 1:
-                        st_trend_reversed = False
-                    elif trade.direction == Direction.SELL and st_vote == -1:
-                        st_trend_reversed = False
-                if st_trend_reversed or duration_mins > theta_mins + 30:
-                    await self._close(trade, current_price, candle.time, f"THETA_MITIGATION_{theta_mins}M")
-                    continue
+            s_name = trade.instrument.split(":")[0] if ":" in trade.instrument else ""
+            is_selling_strategy = s_name in ("IRON_CONDOR", "CREDIT_SPREAD", "SHORT_STRANGLE")
+            
+            if not is_selling_strategy:
+                theta_mins = self.risk_config.get("theta_timeout_mins", 45)
+                duration_mins = (t_candle - t_entry).total_seconds() / 60
+                if duration_mins > theta_mins and not trade.t1_hit:
+                    st_trend_reversed = True  # default: close unless Supertrend confirms trend alive
+                    if snapshot and "supertrend" in snapshot.indicators:
+                        st_vote = snapshot.indicators["supertrend"].vote
+                        if trade.direction == Direction.BUY and st_vote == 1:
+                            st_trend_reversed = False
+                        elif trade.direction == Direction.SELL and st_vote == -1:
+                            st_trend_reversed = False
+                    if st_trend_reversed or duration_mins > theta_mins + 30:
+                        await self._close(trade, current_price, candle.time, f"THETA_MITIGATION_{theta_mins}M")
+                        continue
 
             # 5. Dynamic Trailing Step Logic
             trade.highest_pnl_pct = max(trade.highest_pnl_pct, trade.pnl_pct)

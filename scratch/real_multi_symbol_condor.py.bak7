@@ -1,0 +1,193 @@
+"""
+Real-data multi-symbol Iron Condor comparison, 2 years (Jul 2024 - Jul 2026).
+Data: NSE F&O bhavcopy (real settlement prices, real per-row lot size via NewBrdLotQty).
+Symbols: NIFTY, BANKNIFTY (weekly) + RELIANCE, HDFCBANK, ICICIBANK, TCS, INFY, SBIN,
+         LT, AXISBANK, KOTAKBANK, ITC (monthly - stock options have no weeklies in India).
+Same exit rules for all: 55% profit-take, 2.2x credit stop, else hold to expiry.
+"""
+import csv, glob, json, math, zipfile, io
+from collections import defaultdict
+from datetime import datetime
+
+PROJECT = "/Users/nithish-prabhu/Downloads/intra-day"
+STEP_INDEX = 50
+PROFIT_TAKE_FRAC = 0.55
+STOP_MULT = 2.2
+START_DATE = "20260101"
+
+SYMBOLS_WEEKLY = {"NIFTY"}
+SYMBOLS_MONTHLY = {"BANKNIFTY", "FINNIFTY", "NIFTYNXT50", "MIDCPNIFTY"}
+ALL_SYMBOLS = SYMBOLS_WEEKLY | SYMBOLS_MONTHLY
+
+vix_by_date = {}
+with open(f"{PROJECT}/data/india_vix_1y.json") as f:
+    for row in json.load(f):
+        vix_by_date[row["date"]] = row["close"]
+
+chain = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+underlying_close = defaultdict(dict)
+lot_size_by_date = defaultdict(dict)  # date -> symbol -> real lot size that day
+
+zips = sorted(glob.glob(f"{PROJECT}/data/nse_bhavcopy/*.zip"))
+zips = [z for z in zips if z.split("_")[-1].replace(".csv.zip", "") >= START_DATE]
+
+for zpath in zips:
+    with zipfile.ZipFile(zpath) as zf:
+        name = zf.namelist()[0]
+        with zf.open(name) as fh:
+            reader = csv.DictReader(io.TextIOWrapper(fh, encoding="utf-8"))
+            for row in reader:
+                sym = row["TckrSymb"]
+                if sym not in ALL_SYMBOLS:
+                    continue
+                optn = row["OptnTp"]
+                if optn not in ("CE", "PE"):
+                    continue
+                date = row["TradDt"]
+                expiry = row["XpryDt"]
+                strike = float(row["StrkPric"])
+                close = float(row["ClsPric"])
+                chain[date][sym][expiry].setdefault(strike, {})[optn] = close
+                underlying_close[date][sym] = float(row["UndrlygPric"])
+                # Lot sizes get revised mid-period (e.g. NIFTY 25->75, SEBI-mandated hike) --
+                # record the real lot as of each trading day, not a single frozen value.
+                lot_size_by_date[date][sym] = int(row["NewBrdLotQty"])
+
+dates = sorted(chain.keys())
+
+
+def pick_strike(strikes, target):
+    return min(strikes, key=lambda s: abs(s - target))
+
+
+def get_expiries(sym, kind):
+    all_exp = sorted({e for d in dates for e in chain[d].get(sym, {}).keys()})
+    # Filter out far-dated quarterly/multi-year contracts (NSE lists these alongside the
+    # near-term weekly/monthly chain) -- keep only expiries within ~40 days of the prior
+    # one, which is the real weekly/monthly cadence, not multi-month gaps to far contracts.
+    near_term = []
+    prev = None
+    for e in all_exp:
+        if prev is None or (datetime.strptime(e, "%Y-%m-%d") - datetime.strptime(prev, "%Y-%m-%d")).days <= 40:
+            near_term.append(e)
+        prev = e
+    if kind == "weekly":
+        return near_term
+    by_month = defaultdict(list)
+    for e in near_term:
+        by_month[e[:7]].append(e)
+    return sorted(v[-1] for v in by_month.values())
+
+
+def real_strike_step(strikes_avail, spot):
+    # Measure the ACTUAL near-ATM strike interval from that day's real chain, rather
+    # than guessing by price tier -- near-ATM spacing is what matters for condor/wing
+    # placement even when far-OTM strikes use a coarser (or finer) interval.
+    near = sorted(strikes_avail, key=lambda s: abs(s - spot))[:6]
+    near = sorted(near)
+    diffs = [round(near[i + 1] - near[i], 2) for i in range(len(near) - 1) if near[i + 1] > near[i]]
+    return min(diffs) if diffs else 50.0
+
+
+def run_condor(sym, kind):
+    expiries = get_expiries(sym, kind)
+    step = None
+    trades = []
+    for expiry in expiries:
+        prior = [e for e in expiries if e < expiry]
+        candidates = ([d for d in dates if d > prior[-1] and expiry in chain[d].get(sym, {})]
+                      if prior else [d for d in dates if d <= expiry and expiry in chain[d].get(sym, {})])
+        if not candidates:
+            continue
+        entry_date = candidates[0]
+        lot = lot_size_by_date[entry_date].get(sym, 1)
+        entry_chain = chain[entry_date][sym][expiry]
+        spot = underlying_close[entry_date][sym]
+        avail_early = list(entry_chain.keys())
+        if not avail_early:
+            continue
+        step = real_strike_step(avail_early, spot)
+        vix = vix_by_date.get(entry_date, 15.0) or 15.0
+        dte = max((datetime.strptime(expiry, "%Y-%m-%d") - datetime.strptime(entry_date, "%Y-%m-%d")).days, 1)
+        sigma = spot * (vix / 100.0) * math.sqrt(dte / 365.0)
+        short_off = max(round(sigma * 0.85 / step) * step, 2 * step)
+        wing_off = max(round(sigma * 1.30 / step) * step, short_off + 2 * step)
+        atm = round(spot / step) * step
+        avail = list(entry_chain.keys())
+        if not avail:
+            continue
+        short_pe, long_pe = pick_strike(avail, atm - short_off), pick_strike(avail, atm - wing_off)
+        short_ce, long_ce = pick_strike(avail, atm + short_off), pick_strike(avail, atm + wing_off)
+        try:
+            credit = (entry_chain[short_pe]["PE"] + entry_chain[short_ce]["CE"]) - \
+                     (entry_chain[long_pe]["PE"] + entry_chain[long_ce]["CE"])
+        except KeyError:
+            continue
+        if credit <= 0:
+            continue
+        cycle_dates = [d for d in dates if entry_date < d <= expiry and expiry in chain[d].get(sym, {})]
+        exit_debit, exit_date = None, None
+        for d in cycle_dates:
+            dc = chain[d][sym][expiry]
+            try:
+                cur = (dc[short_pe]["PE"] + dc[short_ce]["CE"]) - (dc[long_pe]["PE"] + dc[long_ce]["CE"])
+            except KeyError:
+                continue
+            if cur <= credit * (1 - PROFIT_TAKE_FRAC) or cur >= credit * STOP_MULT:
+                exit_debit, exit_date = cur, d
+                break
+        if exit_debit is None:
+            exit_candidates = [d for d in dates if d <= expiry and expiry in chain[d].get(sym, {})]
+            if not exit_candidates:
+                continue
+            exit_date = exit_candidates[-1]
+            try:
+                exit_debit = (chain[exit_date][sym][expiry][short_pe]["PE"] + chain[exit_date][sym][expiry][short_ce]["CE"]) - \
+                             (chain[exit_date][sym][expiry][long_pe]["PE"] + chain[exit_date][sym][expiry][long_ce]["CE"])
+            except KeyError:
+                continue
+        pnl = round((credit - exit_debit) * lot, 2)
+        trades.append({"expiry": expiry, "entry_date": entry_date, "pnl": pnl, "lot": lot})
+    return trades
+
+
+print(f"\n{'='*90}\nMULTI-SYMBOL IRON CONDOR — REAL DATA, 2 years (Jul 2024 - Jul 2026)\n{'='*90}")
+print(f"{'Symbol':12s} {'Cycle':8s} {'Lot':>10s} {'Cycles':>7s} {'Wins':>6s} {'Win%':>6s} {'Net PnL':>14s}")
+
+results = []
+for sym in sorted(SYMBOLS_WEEKLY):
+    trades = run_condor(sym, "weekly")
+    results.append((sym, "weekly", trades))
+for sym in sorted(SYMBOLS_MONTHLY):
+    trades = run_condor(sym, "monthly")
+    results.append((sym, "monthly", trades))
+
+report_rows = []
+for sym, kind, trades in results:
+    n = len(trades)
+    wins = sum(1 for t in trades if t["pnl"] > 0)
+    win_pct = wins / n * 100 if n else 0
+    total = sum(t["pnl"] for t in trades)
+    lots_seen = sorted({t["lot"] for t in trades})
+    lot_str = str(lots_seen[0]) if len(lots_seen) == 1 else f"{lots_seen[0]}-{lots_seen[-1]}"
+    print(f"{sym:12s} {kind:8s} {lot_str:>10s} {n:7d} {wins:6d} {win_pct:5.0f}% {total:14,.2f}")
+    report_rows.append((sym, kind, lot_str, n, wins, win_pct, total))
+
+print(f"{'='*90}\n")
+
+report_path = f"{PROJECT}/reports/real_data_index_condor_2024-07_to_2026-07.md"
+with open(report_path, "w") as f:
+    f.write("# Real-Data Index Iron Condor Comparison — 2 Years (Jul 2024 to Jul 2026)\n\n")
+    f.write("**Data:** NSE F&O bhavcopy real settlement prices, real per-trade-day lot size (NewBrdLotQty -- ")
+    f.write("lot sizes were revised mid-window, e.g. NIFTY 25->75; using the entry day's actual lot, not a frozen value). ")
+    f.write("NIFTY: weekly cycles. BANKNIFTY/FINNIFTY/NIFTYNXT50/MIDCPNIFTY: monthly cycles (weeklies discontinued/never existed). ")
+    f.write(f"**Exit rules:** {int(PROFIT_TAKE_FRAC*100)}% profit-take, {STOP_MULT}x credit stop, else hold to expiry.\n\n")
+    f.write("## Summary (ranked by Net PnL)\n\n| Symbol | Cycle | Lot | Cycles | Wins | Win% | Net PnL |\n|---|---|---|---|---|---|---|\n")
+    for sym, kind, lot, n, wins, win_pct, total in sorted(report_rows, key=lambda r: -r[6]):
+        f.write(f"| {sym} | {kind} | {lot} | {n} | {wins} | {win_pct:.0f}% | Rs {total:,.2f} |\n")
+    for sym, kind, trades in results:
+        f.write(f"\n## {sym} ({kind}) — Cycle Detail\n\n| Expiry | Entry | Lot | PnL |\n|---|---|---|---|\n")
+        for t in trades:
+            f.write(f"| {t['expiry']} | {t['entry_date']} | {t['lot']} | {t['pnl']:.2f} |\n")
+
+print(f"Report saved to: {report_path}")

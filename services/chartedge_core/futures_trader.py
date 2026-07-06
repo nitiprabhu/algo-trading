@@ -240,8 +240,19 @@ class FuturesTradingEngine:
         sl_price, t1_price, t2_price = self._resolve_levels(signal, direction, entry_price)
 
         total_capital = self.risk_config.get("total_capital", 200000.0)
+
+        # Risk-based sizing: strategy SL distance varies 30-120pts (range width/ATR),
+        # but lot count was fixed regardless — a 120pt SL at max_lots risked 3x the
+        # intended amount (₹18,000 vs the ₹7,500 implied by sl_points config).
+        # Size lots so rupee risk stays constant: wider SL -> fewer lots.
+        sl_distance = abs(entry_price - sl_price) or self.sl_points
+        risk_pct = self.risk_config.get("futures_risk_per_trade_pct", 1.0)
+        risk_budget = total_capital * (risk_pct / 100.0)
+        lots = max(1, min(self.max_lots, int(risk_budget // (sl_distance * self.lot_size))))
+        quantity = self.lot_size * lots
+
         margin_pct = 0.12 if "BANKNIFTY" in signal.instrument.upper() else 0.11
-        required_margin = entry_price * (self.lot_size * self.max_lots) * margin_pct
+        required_margin = entry_price * quantity * margin_pct
 
         # 1. Calculate used options outlay for margin, and check mutual exclusion if enabled
         used_options_outlay = 0.0
@@ -268,7 +279,7 @@ class FuturesTradingEngine:
             return None
 
         entry_costs = (
-            futures_entry_cost(entry_price, self.lot_size * self.max_lots, direction.value).total
+            futures_entry_cost(entry_price, quantity, direction.value).total
             if self.apply_costs else 0.0
         )
 
@@ -280,7 +291,7 @@ class FuturesTradingEngine:
             t1_price=t1_price,
             t2_price=t2_price,
             lot_size=self.lot_size,
-            max_lots=self.max_lots,
+            max_lots=lots,
         )
 
         self.open_positions[signal.instrument] = trade

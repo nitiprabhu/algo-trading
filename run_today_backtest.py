@@ -17,8 +17,8 @@ async def main():
     # Initialize runtime
     runtime = IndstocksMarketRuntime(config, skip_db_load=True)
     
-    # Define time range (Defaulting to May 8th for today's backtest)
-    target_date = datetime(2026, 5, 8).date()
+    # Define time range dynamically to today's date
+    target_date = datetime.now(IST).date()
     start = datetime.combine(target_date, datetime.strptime("09:00", "%H:%M").time(), tzinfo=IST)
     end = datetime.combine(target_date, datetime.strptime("15:30", "%H:%M").time(), tzinfo=IST)
     

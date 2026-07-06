@@ -1,0 +1,164 @@
+"""
+Real-data 2-year NIFTY daily-swing futures backtest.
+Data: NSE F&O bhavcopy (data/nse_bhavcopy/) - real front-month futures settlement prices.
+No intraday candles used anywhere - daily EMA crossover + ATR stop, front-month roll.
+"""
+import csv, glob, zipfile, io, math
+from collections import defaultdict
+from datetime import datetime
+
+PROJECT = "/Users/nithish-prabhu/Downloads/intra-day"
+LOT = 75
+EMA_FAST, EMA_SLOW = 5, 20
+ATR_PERIOD = 14
+ATR_STOP_MULT = 1.5
+RISK_PCT = 0.75      # % of capital risked per trade
+TOTAL_CAPITAL = 500000.0
+
+# ---- Load front-month NIFTY futures daily bars from bhavcopy ----
+bars = {}  # date -> {open, high, low, close}
+zips = sorted(glob.glob(f"{PROJECT}/data/nse_bhavcopy/*.zip"))
+
+for zpath in zips:
+    with zipfile.ZipFile(zpath) as zf:
+        name = zf.namelist()[0]
+        with zf.open(name) as fh:
+            reader = csv.DictReader(io.TextIOWrapper(fh, encoding="utf-8"))
+            candidates = []
+            date = None
+            for row in reader:
+                if row["TckrSymb"] != "NIFTY" or row["FinInstrmTp"] != "IDF":
+                    continue
+                date = row["TradDt"]
+                candidates.append((row["XpryDt"], row))
+            if candidates:
+                # front month = nearest expiry >= trade date
+                candidates.sort(key=lambda x: x[0])
+                front = candidates[0][1]
+                bars[date] = {
+                    "open": float(front["OpnPric"]),
+                    "high": float(front["HghPric"]),
+                    "low": float(front["LwPric"]),
+                    "close": float(front["ClsPric"]),
+                }
+
+dates = sorted(bars.keys())
+closes = [bars[d]["close"] for d in dates]
+
+
+def ema_series(values, period):
+    k = 2 / (period + 1)
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(v * k + out[-1] * (1 - k))
+    return out
+
+
+ema_fast = ema_series(closes, EMA_FAST)
+ema_slow = ema_series(closes, EMA_SLOW)
+
+# True range / ATR
+tr = [bars[dates[0]]["high"] - bars[dates[0]]["low"]]
+for i in range(1, len(dates)):
+    h, l, pc = bars[dates[i]]["high"], bars[dates[i]]["low"], closes[i - 1]
+    tr.append(max(h - l, abs(h - pc), abs(l - pc)))
+
+atr = [None] * len(dates)
+for i in range(len(dates)):
+    if i + 1 >= ATR_PERIOD:
+        atr[i] = sum(tr[i + 1 - ATR_PERIOD:i + 1]) / ATR_PERIOD
+
+trades = []
+position = None  # {"dir": "BUY"/"SELL", "entry_date", "entry_price", "sl", "qty"}
+
+for i in range(EMA_SLOW + 1, len(dates)):
+    d = dates[i]
+    price = closes[i]
+    cross_up = ema_fast[i - 1] <= ema_slow[i - 1] and ema_fast[i] > ema_slow[i]
+    cross_down = ema_fast[i - 1] >= ema_slow[i - 1] and ema_fast[i] < ema_slow[i]
+
+    if position:
+        direction_mult = 1 if position["dir"] == "BUY" else -1
+        hit_sl = (position["dir"] == "BUY" and bars[d]["low"] <= position["sl"]) or \
+                 (position["dir"] == "SELL" and bars[d]["high"] >= position["sl"])
+        reverse = (position["dir"] == "BUY" and cross_down) or (position["dir"] == "SELL" and cross_up)
+
+        if hit_sl or reverse:
+            exit_price = position["sl"] if hit_sl else price
+            pnl = (exit_price - position["entry_price"]) * direction_mult * position["qty"]
+            trades.append({
+                "dir": position["dir"], "entry_date": position["entry_date"], "exit_date": d,
+                "entry_price": position["entry_price"], "exit_price": exit_price,
+                "reason": "SL" if hit_sl else "REVERSE", "qty": position["qty"], "pnl": round(pnl, 2),
+            })
+            position = None
+
+    if position is None and atr[i] and (cross_up or cross_down):
+        direction = "BUY" if cross_up else "SELL"
+        sl_dist = max(atr[i] * ATR_STOP_MULT, 20.0)
+        risk_budget = TOTAL_CAPITAL * (RISK_PCT / 100.0)
+        lots = max(1, int(risk_budget // (sl_dist * LOT)))
+        qty = LOT * lots
+        sl = price - sl_dist if direction == "BUY" else price + sl_dist
+        position = {"dir": direction, "entry_date": d, "entry_price": price, "sl": sl, "qty": qty}
+
+# close any open position at last available date
+if position:
+    d = dates[-1]
+    direction_mult = 1 if position["dir"] == "BUY" else -1
+    pnl = (closes[-1] - position["entry_price"]) * direction_mult * position["qty"]
+    trades.append({
+        "dir": position["dir"], "entry_date": position["entry_date"], "exit_date": d,
+        "entry_price": position["entry_price"], "exit_price": closes[-1],
+        "reason": "EOD_OPEN", "qty": position["qty"], "pnl": round(pnl, 2),
+    })
+
+# ---- Report ----
+print(f"\n{'='*100}")
+print("REAL-DATA 2-YEAR NIFTY DAILY-SWING FUTURES BACKTEST (EMA20/50 crossover + ATR stop, front-month roll)")
+print(f"{'='*100}")
+print(f"{'Dir':4s} {'Entry':11s} {'Exit':11s} {'Reason':8s} {'EntryPx':>9s} {'ExitPx':>9s} {'Qty':>5s} {'PnL':>10s}")
+for t in trades:
+    print(f"{t['dir']:4s} {t['entry_date']:11s} {t['exit_date']:11s} {t['reason']:8s} "
+          f"{t['entry_price']:9.1f} {t['exit_price']:9.1f} {t['qty']:5d} {t['pnl']:10.2f}")
+
+monthly = defaultdict(lambda: {"pnl": 0.0, "trades": 0, "wins": 0})
+for t in trades:
+    month = t["entry_date"][:7]
+    monthly[month]["pnl"] += t["pnl"]
+    monthly[month]["trades"] += 1
+    if t["pnl"] > 0:
+        monthly[month]["wins"] += 1
+
+print(f"\n{'='*70}\nMONTH-WISE P/L SUMMARY\n{'='*70}")
+print(f"{'Month':10s} {'Trades':>7s} {'Wins':>6s} {'Win%':>6s} {'Net PnL':>12s}")
+total_pnl, total_trades, total_wins = 0.0, 0, 0
+for month in sorted(monthly.keys()):
+    m = monthly[month]
+    win_pct = m["wins"] / m["trades"] * 100 if m["trades"] else 0
+    print(f"{month:10s} {m['trades']:7d} {m['wins']:6d} {win_pct:5.0f}% {m['pnl']:12,.2f}")
+    total_pnl += m["pnl"]; total_trades += m["trades"]; total_wins += m["wins"]
+
+win_pct_total = total_wins / total_trades * 100 if total_trades else 0
+print(f"{'-'*70}\n{'TOTAL':10s} {total_trades:7d} {total_wins:6d} {win_pct_total:5.0f}% {total_pnl:12,.2f}\n{'='*70}\n")
+
+report_path = f"{PROJECT}/reports/real_data_swing_futures_backtest_ema5_20.md"
+with open(report_path, "w") as f:
+    f.write("# Real-Data NIFTY Daily-Swing Futures Backtest — Jul 2024 to Jul 2026 (2 years)\n\n")
+    f.write("**Data source:** NSE F&O bhavcopy front-month futures (real OHLC/settlement, `data/nse_bhavcopy/`). ")
+    f.write("Daily bars only, no intraday candles used or needed.\n\n")
+    f.write(f"**Strategy:** EMA{EMA_FAST}/EMA{EMA_SLOW} daily crossover, ATR({ATR_PERIOD})x{ATR_STOP_MULT} stop-loss, ")
+    f.write("risk-based position sizing (constant rupee risk per trade, same fix as the intraday futures engine), ")
+    f.write("reverse-on-opposite-crossover (always in the market once first signal fires).\n\n")
+    f.write("## Monthly P/L Summary\n\n| Month | Trades | Wins | Win% | Net PnL |\n|---|---|---|---|---|\n")
+    for month in sorted(monthly.keys()):
+        m = monthly[month]
+        win_pct = m["wins"] / m["trades"] * 100 if m["trades"] else 0
+        f.write(f"| {month} | {m['trades']} | {m['wins']} | {win_pct:.0f}% | Rs {m['pnl']:,.2f} |\n")
+    f.write(f"| **TOTAL** | **{total_trades}** | **{total_wins}** | **{win_pct_total:.0f}%** | **Rs {total_pnl:,.2f}** |\n\n")
+    f.write("## Per-Trade Detail\n\n| Dir | Entry | Exit | Reason | Entry Px | Exit Px | Qty | PnL |\n|---|---|---|---|---|---|---|---|\n")
+    for t in trades:
+        f.write(f"| {t['dir']} | {t['entry_date']} | {t['exit_date']} | {t['reason']} | "
+                f"{t['entry_price']:.1f} | {t['exit_price']:.1f} | {t['qty']} | {t['pnl']:.2f} |\n")
+
+print(f"Report saved to: {report_path}")

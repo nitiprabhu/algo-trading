@@ -11,7 +11,7 @@ import httpx
 
 from services.chartedge_core.confluence import consideration
 from services.chartedge_core.models import Candle, Direction, EntryZone, IndicatorSnapshot, Signal
-from services.chartedge_core.strategies import EagleNiftyT315, FiveEMAScalping, NiftyFuturesORB, IronCondorStrategy, VWAPReversionStrategy
+from services.chartedge_core.strategies import EagleNiftyT315, FiveEMAScalping, NiftyFuturesORB, IronCondorStrategy, VWAPReversionStrategy, InstitutionalFlowOIFootprint
 
 
 class AIProvider(ABC):
@@ -245,6 +245,8 @@ class SignalEngine:
         candles: list[Candle],
         india_vix: float = 0.0,
         latest_snapshot: IndicatorSnapshot | None = None,
+        token_oi: Optional[dict[str, float]] = None,
+        token_ltp: Optional[dict[str, float]] = None,
     ) -> Signal | None:
         """Check for F&O specific strategy triggers (T315, 5EMA) and review them via AI."""
         symbol = candle.instrument
@@ -253,8 +255,9 @@ class SignalEngine:
                 "t315": EagleNiftyT315(),
                 "ema5": FiveEMAScalping(),
                 "fut_orb": NiftyFuturesORB(),
-                "iron_condor": IronCondorStrategy(),   # SELL premium in VIX≤14 range markets
+                "iron_condor": IronCondorStrategy(),   # SELL premium in VIX<=14 range markets
                 "vwap_rev": VWAPReversionStrategy(),   # SELL/BUY reversion in chop markets
+                "ifof": InstitutionalFlowOIFootprint(), # IFOF strategy
             }
         
         strategies = self.strategies[symbol]
@@ -268,6 +271,7 @@ class SignalEngine:
         strategies["fut_orb"].update(candle)
         strategies["iron_condor"].update(candle)
         strategies["vwap_rev"].update(candle)
+        strategies["ifof"].update(candle)
 
         # 3. Check for triggers (T315 uses updated state)
         t315_trigger = strategies["t315"].get_signal(candle, india_vix)
@@ -302,7 +306,18 @@ class SignalEngine:
                 candle, india_vix, vwap=vwap_val, adx=adx_val
             )
 
-        trigger = t315_trigger or ema5_trigger or fut_orb_trigger or condor_trigger or vwap_rev_trigger
+        # 5. IFOF Strategy Trigger
+        ifof_trigger = strategies["ifof"].get_signal(
+            candle,
+            india_vix,
+            latest_snapshot=latest_snapshot,
+            token_oi=token_oi,
+            token_ltp=token_ltp,
+            vwap_val=vwap_val,
+            adx_val=adx_val
+        )
+
+        trigger = t315_trigger or ema5_trigger or fut_orb_trigger or condor_trigger or vwap_rev_trigger or ifof_trigger
 
         if not trigger:
             # Periodic health check print (every 5 mins per instrument)
@@ -313,7 +328,8 @@ class SignalEngine:
                     f"5EMA: {'YES' if ema5_trigger else 'NO'}, "
                     f"FUT_ORB: {'YES' if fut_orb_trigger else 'NO'}, "
                     f"CONDOR: {'YES' if condor_trigger else 'NO'}, "
-                    f"VWAP: {'YES' if vwap_rev_trigger else 'NO'})"
+                    f"VWAP: {'YES' if vwap_rev_trigger else 'NO'}, "
+                    f"IFOF: {'YES' if ifof_trigger else 'NO'})"
                 )
             return None
 
@@ -340,8 +356,9 @@ class SignalEngine:
         base_signal = self._from_strategy_dict(trigger, candle)
 
         # T315 structural breakout validated — lock direction for this symbol today.
-        # Disabled on Thursday (weekly expiry): morning false breakouts are common on expiry days.
-        if trigger["strategy"] == "T315" and candle.time.weekday() != 3:
+        # Disabled on Tuesday (NIFTY weekly expiry since 2024-09, see expiry_map):
+        # morning false breakouts are common on expiry days.
+        if trigger["strategy"] == "T315" and candle.time.weekday() != 1:
             self.t315_direction_lock[symbol] = (trigger["option_type"], candle.time.date())
             print(f"🔒 [T315 Lock] {symbol}: {trigger['option_type']} breakout locked for {candle.time.date()}")
 

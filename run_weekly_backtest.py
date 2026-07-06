@@ -1,7 +1,7 @@
 import asyncio
 import os
 import sys
-from datetime import datetime, date
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 try:
     from tabulate import tabulate
@@ -18,7 +18,7 @@ except ImportError:
                 cell_str = str(r[col_idx]) if col_idx < len(r) else ""
                 max_w = max(max_w, len(cell_str))
             col_widths.append(max_w)
-            
+
         output = []
         if headers:
             output.append(" | ".join(str(h).ljust(col_widths[i]) for i, h in enumerate(headers)))
@@ -34,33 +34,33 @@ IST = ZoneInfo("Asia/Kolkata")
 async def main():
     config_path = os.path.abspath("shared/config.yaml")
     config = load_config(config_path)
-    
+
     # Initialize runtime
     runtime = IndstocksMarketRuntime(config, skip_db_load=True)
-    start = datetime(2026, 6, 1, 9, 0, tzinfo=IST)
-    end = datetime(2026, 6, 15, 15, 30, tzinfo=IST)
-    
+    start = datetime(2026, 6, 16, 9, 0, tzinfo=IST)
+    end = datetime(2026, 6, 25, 15, 30, tzinfo=IST)
+
     print("=" * 60)
     print(f"🚀 STARTING WEEKLY BACKTEST FROM {start.date()} TO {end.date()}")
     print(f"📊 AI Debate Module Status: {'ENABLED' if config.ai.get('debate_enabled') else 'DISABLED'}")
     print(f"🤖 AI System Enabled: {'ENABLED' if config.ai.get('enabled') else 'DISABLED'}")
     print("=" * 60)
-    
+
     # Run backtest
     results = await runtime.run_backtest(start, end, run_regime_agent=True)
-    
+
     if results.get("status") == "error":
         print(f"❌ Backtest failed: {results}")
         sys.exit(1)
-        
+
     closed_trades = runtime.trader.closed_trades + [
         t.to_paper_trade() for t in runtime.futures_trader.closed_trades
     ]
-    
+
     print("\n" + "="*60)
     print("🏁 BACKTEST COMPLETE")
     print("="*60)
-    
+
     # Display trades list
     print("\n📜 EXECUTED TRADES LOG:")
     if not closed_trades:
@@ -88,7 +88,7 @@ async def main():
                 f"{t.pnl:+.2f}"
             ])
         print(tabulate(rows, headers=headers, tablefmt="grid"))
-        
+
     # Group by date for daily breakdown
     daily_pnl = {}
     # Initialize all dates in the range
@@ -97,8 +97,8 @@ async def main():
         # Exclude weekends from breakdown
         if current.weekday() < 5:
             daily_pnl[current] = {"pnl": 0.0, "opt_pnl": 0.0, "fut_pnl": 0.0, "trades": 0}
-        current = datetime.combine(current, datetime.min.time()).date() + sys.modules['datetime'].timedelta(days=1)
-        
+        current = current + timedelta(days=1)
+
     for t in closed_trades:
         t_date = t.entry_time.astimezone(IST).date()
         if t_date not in daily_pnl:
@@ -109,7 +109,7 @@ async def main():
         else:
             daily_pnl[t_date]["opt_pnl"] += t.pnl
         daily_pnl[t_date]["trades"] += 1
-        
+
     print("\n📅 DAILY PERFORMANCE BREAKDOWN:")
     breakdown_rows = []
     total_pnl = 0.0
@@ -130,13 +130,13 @@ async def main():
         ])
     breakdown_rows.append(["TOTAL", total_trades, f"₹{total_opt:+.2f}", f"₹{total_fut:+.2f}", f"₹{total_pnl:+.2f}"])
     print(tabulate(breakdown_rows, headers=["Date", "Trades Count", "Options PnL", "Futures PnL", "Net PnL"], tablefmt="grid"))
-    
+
     # Key performance metrics
     print("\n📊 STRATEGY METRICS SUMMARY:")
     wins = [t for t in closed_trades if t.pnl > 0]
     losses = [t for t in closed_trades if t.pnl <= 0]
     win_rate = (len(wins) / len(closed_trades) * 100) if closed_trades else 0.0
-    
+
     metrics = [
         ["Total Trades", len(closed_trades)],
         ["Winning Trades", len(wins)],
@@ -148,4 +148,5 @@ async def main():
     print("=" * 60)
 
 if __name__ == "__main__":
+    os.environ["CHARTEDGE_DATA_SOURCE"] = "mock"
     asyncio.run(main())

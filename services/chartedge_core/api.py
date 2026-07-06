@@ -28,17 +28,34 @@ print(f"DEBUG: Data source: {data_source}")
 print("DEBUG: Initializing runtime...")
 runtime = IndstocksMarketRuntime(config) if data_source == "indstocks" else MarketSimulator(config)
 print("DEBUG: Runtime initialized")
+
+# Positional (weekly condor) engine -- fully separate from intraday, own capital,
+# own JSON log. Only active if shared/config.yaml positional_risk.enabled: true.
+positional_engine = None
+positional_runtime_wrapper = None
+_positional_cfg = config.positional_risk or {}
+if _positional_cfg.get("enabled", False):
+    from services.chartedge_core.positional_trading import PositionalTradingEngine
+    from services.chartedge_core.positional_runtime import PositionalRuntime
+    positional_engine = PositionalTradingEngine(
+        capital=_positional_cfg.get("capital", 100000.0),
+        log_path="data/positional_trades.json",
+        strategy_name=_positional_cfg.get("strategy", "condor"),
+    )
+    positional_runtime_wrapper = PositionalRuntime(positional_engine, _positional_cfg)
+    print("DEBUG: Positional trading engine enabled")
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Run sync and run loop in background
     asyncio.create_task(runtime.run())
-    
+
     # Start Telegram Command Listener on startup
     from services.chartedge_core.telegram import notifier
     asyncio.create_task(notifier.start_listening(runtime))
-    
+
     # Background config sync in a thread to avoid blocking the event loop
     if os.getenv("DATABASE_URL"):
         async def background_sync():
@@ -47,6 +64,17 @@ async def lifespan(app: FastAPI):
             await asyncio.to_thread(apply_db_overrides, config)
             print("DEBUG: Background config sync finished")
         asyncio.create_task(background_sync())
+
+    if positional_runtime_wrapper is not None:
+        async def positional_loop():
+            while True:
+                try:
+                    await positional_runtime_wrapper.check_once_per_day(runtime)
+                except Exception as e:
+                    print(f"⚠️ [Positional] check failed: {e}")
+                await asyncio.sleep(300)  # every 5 minutes during market hours
+        asyncio.create_task(positional_loop())
+
     yield
 
 app = FastAPI(title="ChartEdge AI", version="0.1.0", lifespan=lifespan)
@@ -77,6 +105,18 @@ def get_signals() -> list:
 @app.get("/api/snapshot")
 def get_snapshot() -> dict:
     return runtime.snapshot().model_dump(mode="json")
+
+
+@app.get("/api/positional/status")
+def get_positional_status() -> dict:
+    if positional_engine is None:
+        return {"enabled": False, "open_trade": None, "closed_trades": [], "metrics": {}}
+    return {
+        "enabled": True,
+        "open_trade": positional_engine.open_trade.to_dict() if positional_engine.open_trade else None,
+        "closed_trades": [t.to_dict() for t in positional_engine.closed_trades],
+        "metrics": positional_engine.metrics(),
+    }
 
 @app.get("/api/debug/option")
 def debug_option(symbol: str = "NIFTY", side: str = "BUY") -> dict:

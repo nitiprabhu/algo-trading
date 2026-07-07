@@ -60,7 +60,7 @@ def sync_config_to_db(config: Config):
     from services.chartedge_core.database import create_db_and_tables, batch_update_parameters
     print("DEBUG: sync_config_to_db: imports finished")
     
-    # create_db_and_tables() # Already created, keeping it commented for safety
+    create_db_and_tables()
     
     params_to_sync = []
     

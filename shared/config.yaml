@@ -109,6 +109,7 @@ risk:
   notional_per_trade: 500000
   max_open_positions: 2
   mutual_exclusion: false
+  allow_margin: true
   max_signals_per_instrument_per_hour: 3
   confidence_floor: 60
   options_confidence_buffer: 5  # options require confidence_floor + this to filter theta-bleed entries
@@ -126,7 +127,11 @@ risk:
   options_min_trend_sep_pct: 0.10
   strategy_adx_gate: true       # apply intraday ADX trend gate to 5EMA/T315 strategy scalps
   adx_min_trend: 30.0           # ADX >= 30 = strong trend; 22 allowed too many chop trades
-  daily_drawdown_pause_pct: 2.5
+  daily_drawdown_pause_pct: 1.0 # Strict 1% daily capital limit inspired by Arjun Tandon
+  futures_risk_per_trade_pct: 0.75 # Rupee risk per futures trade as % of capital; lots sized
+                                    # down for wider strategy SL instead of firing at max_lots
+                                    # regardless of SL distance (was risking up to 3x this on
+                                    # wide-range ORB days — see futures_trader.py maybe_enter)
   stale_feed_seconds: 60
   price_deviation_guard_pct: 5.0
   timeframe_mins: 15
@@ -140,6 +145,20 @@ risk:
   options_vix_max: 18.0     # moderate VIX zone — allow buys only with strong ADX
   options_vix_panic: 22.0   # extreme VIX — block all option buys unconditionally
   adx_min_high_vix: 32.0    # ADX floor for buys when VIX is 18–22
+
+positional_risk:
+  # Weekly NIFTY options -- separate module (positional_trading.py), separate
+  # capital pool, isolated from intraday. See scratch/real_options_strategy_comparison.py
+  # for the validation methodology (2yr real bhavcopy data).
+  enabled: true           # LIVE: watch for Telegram entry/exit alerts during market hours
+  strategy: condor        # condor (default, bounded risk) | straddle (undefined risk,
+                           # highest raw profit) | credit_spread (lowest variance)
+  capital: 100000.0       # separate allocation, not shared with intraday total_capital
+  lot_size: 75            # NIFTY lot size (SEBI revised 25->75; update if changed again)
+  profit_take_frac: 0.55
+  stop_credit_mult: 1.1   # tighter stop for lower per-trade pain; see positional_trading.py comment
+  short_sigma_mult: 0.85
+  wing_sigma_mult: 1.30
 
 futures_risk:
   NIFTY_FUT:

@@ -885,7 +885,7 @@ class IndstocksMarketRuntime(MarketSimulator):
         iv_rank = self._iv_rank_by_symbol.get(symbol, 50.0)
 
         optimal_strategy = "NAKED_BUY"
-        if strategy_name in ("T315", "5EMA"):
+        if strategy_name in ("T315", "5EMA", "IFOF"):
             optimal_strategy = "DEBIT_SPREAD"
         elif strategy_name and strategy_name.startswith("FUT_"):
             return None

@@ -92,6 +92,8 @@ def candle():
 
 @pytest.mark.anyio
 async def test_mutual_exclusion_blocks_futures(engine, basic_signal, candle):
+    # Enable mutual exclusion in config
+    engine.risk_config["mutual_exclusion"] = True
     # Simulate an active options position
     engine.simulator.trader.open_positions["NIFTY_CE"] = MockPosition(invested_amount=10000)
     
@@ -136,7 +138,8 @@ async def test_eod_square_off(engine, basic_signal, candle):
 async def test_target_1_breakeven_trail(engine, basic_signal, candle):
     engine.max_lots = 2
     engine.risk_config["notional_per_trade"] = 400000 # Enough capital for 2 lots
-    
+    engine.risk_config["futures_risk_per_trade_pct"] = 1.5 # Enough risk budget for 2 lots at 50pt SL
+
     # Enter trade
     await engine.maybe_enter(basic_signal, candle)
     trade = engine.open_positions["NIFTY_FUT"]

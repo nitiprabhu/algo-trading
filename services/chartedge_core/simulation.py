@@ -285,7 +285,14 @@ class MarketSimulator:
             vix_val = self.candles.get("INDIAVIX")[-1].close if self.candles.get("INDIAVIX") else 0.0
             # Push live VIX into risk_config so paper_trading VIX gate can read it
             self.trader.risk_config["current_vix"] = vix_val
-            fo_signal = await self.signal_engine.get_fo_signal(candle, list(self.candles[symbol]), vix_val, snapshot)
+            fo_signal = await self.signal_engine.get_fo_signal(
+                candle,
+                list(self.candles[symbol]),
+                vix_val,
+                snapshot,
+                token_oi=getattr(self, "_token_oi", {}),
+                token_ltp=getattr(self, "_token_ltp", {})
+            )
             if fo_signal:
                 # Intraday ADX trend gate for strategy scalps (5EMA/T315).
                 # Prior-day regime mislabels intraday trend days as chop; use live ADX instead.
@@ -618,7 +625,7 @@ class MarketSimulator:
         futures_closed = [t.to_paper_trade() for t in self.futures_trader.closed_trades]
         combined_closed = sorted(
             options_closed + futures_closed,
-            key=lambda t: t.exit_time or t.entry_time
+            key=lambda t: (t.exit_time or t.entry_time).replace(tzinfo=None)
         )
         closed_trades = combined_closed[-50:]
 

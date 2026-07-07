@@ -45,6 +45,25 @@ if _positional_cfg.get("enabled", False):
     positional_runtime_wrapper = PositionalRuntime(positional_engine, _positional_cfg)
     print("DEBUG: Positional trading engine enabled")
 
+# Positional stocks (large-cap technical investment) engine -- fully separate
+# from intraday and from the weekly options positional module, own capital,
+# own DB table. Long-only: BUY opens, SELL only closes. Only active if
+# shared/config.yaml positional_stocks_risk.enabled: true.
+positional_stocks_engine = None
+positional_stocks_runtime_wrapper = None
+_positional_stocks_cfg = config.positional_stocks_risk or {}
+if _positional_stocks_cfg.get("enabled", False):
+    from services.chartedge_core.positional_stocks import PositionalStocksEngine
+    from services.chartedge_core.positional_stocks_runtime import PositionalStocksRuntime
+    positional_stocks_engine = PositionalStocksEngine(
+        capital=_positional_stocks_cfg.get("capital", 100000.0),
+        max_positions=_positional_stocks_cfg.get("max_positions", 4),
+        stop_loss_pct=_positional_stocks_cfg.get("stop_loss_pct", 6.0),
+        target_pct=_positional_stocks_cfg.get("target_pct", 12.0),
+    )
+    positional_stocks_runtime_wrapper = PositionalStocksRuntime(positional_stocks_engine, _positional_stocks_cfg)
+    print("DEBUG: Positional stocks engine enabled")
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
@@ -74,6 +93,16 @@ async def lifespan(app: FastAPI):
                     print(f"⚠️ [Positional] check failed: {e}")
                 await asyncio.sleep(300)  # every 5 minutes during market hours
         asyncio.create_task(positional_loop())
+
+    if positional_stocks_runtime_wrapper is not None:
+        async def positional_stocks_loop():
+            while True:
+                try:
+                    await positional_stocks_runtime_wrapper.check_once_per_day(runtime)
+                except Exception as e:
+                    print(f"⚠️ [Positional Stocks] check failed: {e}")
+                await asyncio.sleep(900)  # every 15 min; internal once-per-day guard makes cadence non-critical
+        asyncio.create_task(positional_stocks_loop())
 
     yield
 
@@ -117,6 +146,18 @@ def get_positional_status() -> dict:
         "closed_trades": [t.to_dict() for t in positional_engine.closed_trades],
         "metrics": positional_engine.metrics(),
     }
+
+@app.get("/api/positional_stocks/status")
+def get_positional_stocks_status() -> dict:
+    if positional_stocks_engine is None:
+        return {"enabled": False, "open_positions": {}, "closed_positions": [], "metrics": {}}
+    return {
+        "enabled": True,
+        "open_positions": {sym: p.to_dict() for sym, p in positional_stocks_engine.open_positions.items()},
+        "closed_positions": [p.to_dict() for p in positional_stocks_engine.closed_positions],
+        "metrics": positional_stocks_engine.metrics(),
+    }
+
 
 @app.get("/api/debug/option")
 def debug_option(symbol: str = "NIFTY", side: str = "BUY") -> dict:

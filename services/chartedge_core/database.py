@@ -293,3 +293,107 @@ def clear_all_trades():
             print("🧨 All trade records cleared from database.")
     except Exception as e:
         print(f"⚠️ Failed to clear trades: {e}")
+
+
+# ── Positional Stocks (technical-investment, long-only) Persistence ────────────
+
+class StockPositionRecord(SQLModel, table=True):
+    """Persists positional-stocks (large-cap technical investment) positions.
+    Fully separate from TradeRecord (intraday) and the options positional
+    JSON log -- own table, own capital pool."""
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    position_id: str = Field(index=True, unique=True)
+    symbol: str = Field(index=True)
+    entry_date: str
+    entry_price: float
+    quantity: int
+    status: str = "OPEN"  # OPEN or CLOSED
+    exit_date: Optional[str] = None
+    exit_price: Optional[float] = None
+    exit_reason: Optional[str] = None
+    pnl: float = 0.0
+    pnl_pct: float = 0.0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+def persist_stock_entry(position) -> Optional[StockPositionRecord]:
+    """Save a new positional-stocks BUY entry to the database."""
+    if not DATABASE_URL:
+        return None
+    try:
+        with Session(engine) as session:
+            record = StockPositionRecord(
+                position_id=position.id,
+                symbol=position.symbol,
+                entry_date=position.entry_date,
+                entry_price=position.entry_price,
+                quantity=position.quantity,
+                status="OPEN",
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            print(f"📥 Stock position persisted: BUY {position.symbol} @ {position.entry_price}")
+            return record
+    except Exception as e:
+        print(f"⚠️ Failed to persist stock entry: {e}")
+        return None
+
+
+def persist_stock_exit(position) -> Optional[StockPositionRecord]:
+    """Update a positional-stocks record with SELL exit details."""
+    if not DATABASE_URL:
+        return None
+    try:
+        with Session(engine) as session:
+            statement = select(StockPositionRecord).where(StockPositionRecord.position_id == position.id)
+            record = session.exec(statement).first()
+            if not record:
+                print(f"⚠️ Stock position record not found for update: {position.id}")
+                return None
+            record.status = "CLOSED"
+            record.exit_date = position.exit_date
+            record.exit_price = position.exit_price
+            record.exit_reason = position.exit_reason
+            record.pnl = position.pnl
+            record.pnl_pct = position.pnl_pct
+            record.updated_at = datetime.utcnow()
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            print(f"📤 Stock position closed: {position.symbol} PnL={position.pnl} ({position.exit_reason})")
+            return record
+    except Exception as e:
+        print(f"⚠️ Failed to persist stock exit: {e}")
+        return None
+
+
+def get_open_stock_positions() -> List[StockPositionRecord]:
+    if not DATABASE_URL:
+        return []
+    try:
+        with Session(engine) as session:
+            statement = select(StockPositionRecord).where(StockPositionRecord.status == "OPEN")
+            return list(session.exec(statement).all())
+    except Exception as e:
+        print(f"⚠️ Failed to fetch open stock positions: {e}")
+        return []
+
+
+def get_closed_stock_positions(limit: int = 100) -> List[StockPositionRecord]:
+    if not DATABASE_URL:
+        return []
+    try:
+        with Session(engine) as session:
+            statement = (
+                select(StockPositionRecord)
+                .where(StockPositionRecord.status == "CLOSED")
+                .order_by(StockPositionRecord.updated_at.desc())
+                .limit(limit)
+            )
+            return list(session.exec(statement).all())
+    except Exception as e:
+        print(f"⚠️ Failed to fetch closed stock positions: {e}")
+        return []

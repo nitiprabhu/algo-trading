@@ -3,7 +3,6 @@ name = "chartedge-ai"
 version = "0.1.0"
 description = "NSE intraday technical analysis paper-trading platform."
 requires-python = ">=3.11"
-package-mode = false
 dependencies = [
   "fastapi>=0.115.0",
   "uvicorn[standard]>=0.30.0",
@@ -37,3 +36,6 @@ exclude = ["frontend*", "shared*", "tests*", "extracted_pages*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.poetry]
+package-mode = false

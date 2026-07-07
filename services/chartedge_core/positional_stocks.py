@@ -327,7 +327,7 @@ class PositionalStocksEngine:
             entry_price=round(price, 2), quantity=quantity,
         )
         self.open_positions[symbol] = position
-        persist_stock_entry(position)
+        persist_stock_entry(symbol, position.entry_date, position.entry_price, quantity)
         return position
 
     def check_exit(self, symbol: str, today: date, price: float, score: float,
@@ -372,7 +372,7 @@ class PositionalStocksEngine:
         pos.status = "CLOSED"
 
         from services.chartedge_core.database import persist_stock_exit
-        persist_stock_exit(pos)
+        persist_stock_exit(pos.id, pos.exit_date, pos.exit_price, pos.exit_reason, pos.pnl, pos.pnl_pct, pos.peak_pnl_pct)
 
         self.closed_positions.append(pos)
         del self.open_positions[symbol]

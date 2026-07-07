@@ -20,6 +20,7 @@ print("DEBUG: Importing indstocks")
 from services.chartedge_core.indstocks import IndstocksMarketRuntime
 print("DEBUG: Importing simulation")
 from services.chartedge_core.simulation import IST, MarketSimulator
+from services.chartedge_core.database import cleanup_expired_records
 
 
 config = load_config()
@@ -39,7 +40,6 @@ if _positional_cfg.get("enabled", False):
     from services.chartedge_core.positional_runtime import PositionalRuntime
     positional_engine = PositionalTradingEngine(
         capital=_positional_cfg.get("capital", 100000.0),
-        log_path="data/positional_trades.json",
         strategy_name=_positional_cfg.get("strategy", "condor"),
     )
     positional_runtime_wrapper = PositionalRuntime(positional_engine, _positional_cfg)
@@ -103,6 +103,16 @@ async def lifespan(app: FastAPI):
                     print(f"⚠️ [Positional Stocks] check failed: {e}")
                 await asyncio.sleep(900)  # every 15 min; internal once-per-day guard makes cadence non-critical
         asyncio.create_task(positional_stocks_loop())
+
+    # Cleanup expired records daily (TTL: 30 days for positional trades, 180 days for stock positions)
+    async def cleanup_loop():
+        while True:
+            try:
+                await asyncio.to_thread(cleanup_expired_records)
+            except Exception as e:
+                print(f"⚠️ Cleanup failed: {e}")
+            await asyncio.sleep(86400)  # daily
+    asyncio.create_task(cleanup_loop())
 
     yield
 
@@ -269,6 +279,24 @@ async def simulate_step() -> dict:
 def get_daily_history() -> dict:
     from services.chartedge_core.database import get_daily_performance
     return {"history": get_daily_performance()}
+
+
+@app.post("/api/config/indmoney-token")
+def set_indmoney_token(token: str) -> dict:
+    from services.chartedge_core.database import set_indmoney_token
+    result = set_indmoney_token(token)
+    if result:
+        return {"status": "ok", "token_id": result.id, "expires_at": result.expires_at}
+    return {"status": "error", "message": "Failed to store token"}
+
+
+@app.get("/api/config/indmoney-token")
+def check_indmoney_token() -> dict:
+    from services.chartedge_core.database import get_indmoney_token
+    token = get_indmoney_token()
+    if token:
+        return {"status": "ok", "has_token": True}
+    return {"status": "ok", "has_token": False}
 
 
 @app.websocket("/ws")

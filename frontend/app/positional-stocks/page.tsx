@@ -53,7 +53,7 @@ export default function PositionalStocksPage() {
     return () => clearInterval(interval);
   }, []);
 
-  const openPositions = status ? Object.values(status.open_positions) : [];
+  const openPositions = status?.open_positions ? Object.values(status.open_positions) : [];
   const closedPositions = status?.closed_positions ?? [];
   const metrics = status?.metrics ?? {};
 

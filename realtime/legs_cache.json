@@ -593,5 +593,179 @@
       "option_type": "PE",
       "exit_price": null
     }
+  ],
+  "5eaf784d-f9da-4818-981f-ec65d0eaf83d": [
+    {
+      "instrument": "NFO:51391",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 39.34346932675544,
+      "strike": 24450.0,
+      "option_type": "CE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:51397",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 14.610274537037185,
+      "strike": 24550.0,
+      "option_type": "CE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:51388",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 52.203405856793324,
+      "strike": 24350.0,
+      "option_type": "PE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:51384",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 20.696632413536463,
+      "strike": 24250.0,
+      "option_type": "PE",
+      "exit_price": null
+    }
+  ],
+  "3bb39428-13ca-4265-87da-0b0ba2307396": [
+    {
+      "instrument": "NFO:61902",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 628.839209960297,
+      "strike": 58500.0,
+      "option_type": "PE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:61896",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 537.505260099053,
+      "strike": 58300.0,
+      "option_type": "PE",
+      "exit_price": null
+    }
+  ],
+  "d43d4ecd-9ae6-4f80-840c-4b82814a121e": [
+    {
+      "instrument": "NFO:51391",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 39.34346932675544,
+      "strike": 24450.0,
+      "option_type": "CE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:51397",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 14.610274537037185,
+      "strike": 24550.0,
+      "option_type": "CE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:51388",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 52.203405856793324,
+      "strike": 24350.0,
+      "option_type": "PE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:51384",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 20.696632413536463,
+      "strike": 24250.0,
+      "option_type": "PE",
+      "exit_price": null
+    }
+  ],
+  "a2e08714-b5b5-4931-9cda-ca4417d0d00e": [
+    {
+      "instrument": "NFO:61902",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 628.839209960297,
+      "strike": 58500.0,
+      "option_type": "PE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:61896",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 537.505260099053,
+      "strike": 58300.0,
+      "option_type": "PE",
+      "exit_price": null
+    }
+  ],
+  "10a7a7af-8f5c-4fde-a612-4b8f1d52a0f2": [
+    {
+      "instrument": "NFO:51391",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 39.34346932675544,
+      "strike": 24450.0,
+      "option_type": "CE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:51397",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 14.610274537037185,
+      "strike": 24550.0,
+      "option_type": "CE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:51388",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 52.203405856793324,
+      "strike": 24350.0,
+      "option_type": "PE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:51384",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 20.696632413536463,
+      "strike": 24250.0,
+      "option_type": "PE",
+      "exit_price": null
+    }
+  ],
+  "c6492849-bb59-4bde-bda3-2360ae2b8735": [
+    {
+      "instrument": "NFO:61902",
+      "action": "BUY",
+      "ratio": 1,
+      "entry_price": 628.839209960297,
+      "strike": 58500.0,
+      "option_type": "PE",
+      "exit_price": null
+    },
+    {
+      "instrument": "NFO:61896",
+      "action": "SELL",
+      "ratio": 1,
+      "entry_price": 537.505260099053,
+      "strike": 58300.0,
+      "option_type": "PE",
+      "exit_price": null
+    }
   ]
 }

@@ -30,7 +30,6 @@ instruments:
     websocket_token: NSE:2885
     enabled: true
     role: monitor
-    positional_stocks_enabled: true  # long-only technical-investment module (positional_stocks.py)
     timeframes: [1m]
   - symbol: HDFCBANK
     display_name: HDFC Bank
@@ -39,30 +38,12 @@ instruments:
     websocket_token: NSE:1333
     enabled: true
     role: monitor
-    positional_stocks_enabled: true
     timeframes: [1m]
-  # TCS, INFY: placeholder entries -- historical_scrip_code/websocket_token
-  # are NOT real NSE codes yet. Replace NSE_TODO_TCS / NSE_TODO_INFY with
-  # actual INDstocks scrip codes before enabling (see positional_stocks_risk
-  # below); leaving enabled:false until then so nothing silently breaks.
-  - symbol: TCS
-    display_name: Tata Consultancy Services
-    exchange: NSE
-    historical_scrip_code: NSE_TODO_TCS
-    websocket_token: NSE:TODO_TCS
-    enabled: false
-    role: monitor
-    positional_stocks_enabled: true
-    timeframes: [1m]
-  - symbol: INFY
-    display_name: Infosys
-    exchange: NSE
-    historical_scrip_code: NSE_TODO_INFY
-    websocket_token: NSE:TODO_INFY
-    enabled: false
-    role: monitor
-    positional_stocks_enabled: true
-    timeframes: [1m]
+  # Note: TCS/INFY are NOT listed here. positional_stocks.py (long-only
+  # technical-investment module) fetches its own daily OHLCV directly from
+  # yfinance (see positional_stocks_risk.symbols below) -- it does not use
+  # this instruments: list or the INDmoney/indstocks feed at all, so no
+  # NSE historical_scrip_code/websocket_token is needed for those symbols.
   - symbol: INDIAVIX
     display_name: India VIX
     exchange: NSE
@@ -193,7 +174,11 @@ positional_stocks_risk:
   # indicator/pattern list (RSI, MACD, EMA, Supertrend, ADX, Golden Cross,
   # 52-week range, Donchian breakout, Bollinger squeeze, MA pullback, Cup &
   # Handle).
-  enabled: false          # flip true once TCS/INFY scrip codes are real and enabled:true above
+  #
+  # Data source: yfinance (NSE tickers, e.g. RELIANCE.NS) -- NOT the
+  # INDmoney/indstocks feed used by intraday/options. No API token, no
+  # daily expiry, no manual re-auth: fully unattended.
+  enabled: true
   capital: 100000.0       # separate allocation, not shared with intraday or options positional capital
   max_positions: 4        # equal-slot capital sizing: capital / max_positions per stock
   stop_loss_pct: 6.0
@@ -201,6 +186,7 @@ positional_stocks_risk:
   buy_threshold: 0.50
   sell_threshold: -0.50
   min_adx: 20.0           # skip BUY entries when ADX below this (avoid chop)
+  yfinance_period: "2y"   # daily bars pulled per check; 2y gives Golden Cross/Cup&Handle enough history
   check_after_time: "15:35"  # IST cutoff -- runs once per day after this time, not every 5 min
   symbols: [RELIANCE, HDFCBANK, TCS, INFY]
 

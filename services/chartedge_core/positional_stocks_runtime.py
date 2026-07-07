@@ -1,25 +1,58 @@
 """
 positional_stocks_runtime.py
 -----------------------------
-Live wiring for positional_stocks.py against the running market runtime.
+Live wiring for positional_stocks.py. Fully decoupled from the INDmoney/
+indstocks intraday feed -- fetches daily OHLCV directly from yfinance
+(NSE tickers, e.g. RELIANCE.NS), which needs no API token/auth and never
+expires, so this module runs unattended with zero daily intervention.
 Runs genuinely once per calendar day, after a post-close cutoff (default
 15:35 IST) -- daily-swing technical investment, not intraday trading.
-Reads runtime.candles[symbol] read-only (1-minute bars), resamples to
-daily OHLC itself, computes confluence, and calls the engine's BUY-only
-maybe_enter() / check_exit(). Sends Telegram alerts tagged
-"[POSITIONAL STOCKS]" via the same global notifier used elsewhere,
-distinct from the options positional module's "[POSITIONAL]" tag.
+Computes confluence and calls the engine's BUY-only maybe_enter() /
+check_exit(). Sends Telegram alerts tagged "[POSITIONAL STOCKS]" via the
+same global notifier used elsewhere, distinct from the options positional
+module's "[POSITIONAL]" tag.
 """
 from __future__ import annotations
 
 from datetime import datetime, date, time as dtime
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+import yfinance as yf
+
+from services.chartedge_core.models import Candle
 from services.chartedge_core.positional_stocks import (
-    PositionalStocksEngine, daily_candles_from_1m, compute_stock_signal,
+    PositionalStocksEngine, compute_stock_signal,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
+
+# yfinance NSE tickers append .NS; extend as symbols are added.
+YFINANCE_TICKER_SUFFIX = ".NS"
+
+
+def _yf_ticker(symbol: str) -> str:
+    return f"{symbol}{YFINANCE_TICKER_SUFFIX}"
+
+
+def fetch_daily_candles(symbol: str, period: str = "1y") -> list[Candle]:
+    """Pull daily OHLCV from yfinance -- no token, no auth, no expiry.
+    period="1y" is enough for most indicators here; Golden Cross/Cup&Handle
+    need ~200+ bars so a longer period helps once accumulated."""
+    ticker = _yf_ticker(symbol)
+    df = yf.download(ticker, period=period, interval="1d", progress=False)
+    if df.empty:
+        return []
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    candles = []
+    for ts, row in df.iterrows():
+        candles.append(Candle(
+            time=ts.to_pydatetime(), instrument=symbol, timeframe="1D",
+            open=float(row["Open"]), high=float(row["High"]), low=float(row["Low"]),
+            close=float(row["Close"]), volume=int(row["Volume"]),
+        ))
+    return candles
 
 
 class PositionalStocksRuntime:
@@ -28,7 +61,7 @@ class PositionalStocksRuntime:
         self.config = config
         self._last_check_date: date | None = None
 
-    async def check_once_per_day(self, market_runtime) -> None:
+    async def check_once_per_day(self) -> None:
         now = datetime.now(IST)
         today = now.date()
 
@@ -44,12 +77,14 @@ class PositionalStocksRuntime:
         sell_threshold = self.config.get("sell_threshold", -0.50)
         min_adx = self.config.get("min_adx", 20.0)
         weights = self.config.get("indicator_weights", {})
+        yf_period = self.config.get("yfinance_period", "1y")
 
         for symbol in symbols:
-            candles_1m = market_runtime.candles.get(symbol, [])
-            if not candles_1m:
+            try:
+                daily = fetch_daily_candles(symbol, period=yf_period)
+            except Exception as e:
+                print(f"[Positional Stocks] yfinance fetch failed for {symbol}: {e}")
                 continue
-            daily = daily_candles_from_1m(candles_1m)
             if len(daily) < 20:
                 continue  # not enough daily history yet for any indicator to be meaningful
 

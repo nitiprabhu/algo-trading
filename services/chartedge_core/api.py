@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
         async def positional_stocks_loop():
             while True:
                 try:
-                    await positional_stocks_runtime_wrapper.check_once_per_day(runtime)
+                    await positional_stocks_runtime_wrapper.check_once_per_day()
                 except Exception as e:
                     print(f"⚠️ [Positional Stocks] check failed: {e}")
                 await asyncio.sleep(900)  # every 15 min; internal once-per-day guard makes cadence non-critical

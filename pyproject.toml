@@ -16,6 +16,7 @@ dependencies = [
   "sqlmodel>=0.0.22",
   "pandas>=2.0.0",
   "numpy>=1.26.0",
+  "yfinance>=0.2.40",
 ]
 
 [project.optional-dependencies]

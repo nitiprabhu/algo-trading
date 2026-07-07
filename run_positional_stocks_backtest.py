@@ -25,11 +25,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from services.chartedge_core.models import Candle
 from services.chartedge_core.positional_stocks import compute_stock_signal
 
-SYMBOLS = ["RELIANCE", "HDFCBANK", "TCS", "INFY", "ICICIBANK", "SBIN", "BHARTIARTL",
-           "ITC", "KOTAKBANK", "LT", "AXISBANK", "BAJFINANCE", "MARUTI", "ASIANPAINT",
-           "HCLTECH", "SUNPHARMA", "TITAN", "ULTRACEMCO", "WIPRO", "ADANIENT"]
+SYMBOLS = ["SBIN", "ADANIENT", "VEDL", "ONGC", "HINDALCO"]
 CAPITAL = 100_000.0
-MAX_POSITIONS = 8
+MAX_POSITIONS = 5
 STOP_LOSS_PCT = 4.0
 TARGET_PCT = 12.0
 BUY_THRESHOLD = 0.35
@@ -165,8 +163,13 @@ def run_backtest():
         total_pnl = sum(p.pnl for p in report_positions)
         gross_win = sum(p.pnl for p in report_positions if p.pnl > 0)
         gross_loss = abs(sum(p.pnl for p in report_positions if p.pnl <= 0))
+        return_pct = total_pnl / CAPITAL * 100
+        window_days = (all_candles[SYMBOLS[0]][-1].time.date() - report_start).days
+        window_years = window_days / 365.25
+        cagr = ((1 + return_pct / 100) ** (1 / window_years) - 1) * 100 if window_years > 0 else 0
         print(f"Trades: {len(report_positions)} | Wins: {wins} ({wins/len(report_positions)*100:.1f}%)")
-        print(f"Net PnL: Rs {total_pnl:,.2f} | Return: {total_pnl/CAPITAL*100:.2f}% on Rs {CAPITAL:,.0f}")
+        print(f"Net PnL: Rs {total_pnl:,.2f} | Return: {return_pct:.2f}% on Rs {CAPITAL:,.0f} "
+              f"over {window_years:.2f}yr -> CAGR: {cagr:.2f}%")
         print(f"Gross win: Rs {gross_win:,.2f} | Gross loss: Rs {gross_loss:,.2f} | "
               f"Profit factor: {gross_win/gross_loss:.2f}x" if gross_loss else "Profit factor: inf")
         print("\nPer-symbol breakdown:")

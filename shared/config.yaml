@@ -189,7 +189,7 @@ positional_stocks_risk:
   # require_trend_gate without re-backtesting.
   enabled: true
   capital: 100000.0       # separate allocation, not shared with intraday or options positional capital
-  max_positions: 8        # equal-slot capital sizing: capital / max_positions per stock
+  max_positions: 5        # equal-slot capital sizing: capital / max_positions per stock
   stop_loss_pct: 4.0
   target_pct: 12.0
   buy_threshold: 0.35
@@ -199,9 +199,7 @@ positional_stocks_risk:
   trail_arm_pct: 3.0      # once a position peaks at +3%, stop trusting weak SELL_SIGNAL exits
   trail_keep_frac: 0.5    # trailing stop locks in 50% of peak gain once armed
   yfinance_period: "2y"   # daily bars pulled per check; 2y gives Golden Cross/Cup&Handle enough history
-  symbols: [RELIANCE, HDFCBANK, TCS, INFY, ICICIBANK, SBIN, BHARTIARTL, ITC,
-            KOTAKBANK, LT, AXISBANK, BAJFINANCE, MARUTI, ASIANPAINT, HCLTECH,
-            SUNPHARMA, TITAN, ULTRACEMCO, WIPRO, ADANIENT]
+  symbols: [SBIN, ADANIENT, VEDL, ONGC, HINDALCO]  # top 5 by 12mo backtest CAGR (22.69%)
   check_after_time: "15:35"  # IST cutoff -- runs once per day after this time, not every 5 min
 
 futures_risk:

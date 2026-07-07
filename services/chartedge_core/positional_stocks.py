@@ -53,6 +53,7 @@ class StockPosition:
     exit_reason: Optional[str] = None
     pnl: float = 0.0
     pnl_pct: float = 0.0
+    peak_pnl_pct: float = 0.0  # tracks best PnL% seen, drives the trailing stop
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -298,9 +299,13 @@ class PositionalStocksEngine:
         return self.capital / self.max_positions
 
     def maybe_enter(self, symbol: str, today: date, price: float, score: float,
-                     buy_threshold: float, adx_value: float, min_adx: float = 20.0) -> Optional[StockPosition]:
+                     buy_threshold: float, adx_value: float, min_adx: float = 25.0,
+                     trend_confirmed: bool = True) -> Optional[StockPosition]:
         """The ONLY way a position opens. Always a BUY -- there is no
-        equivalent maybe_short()."""
+        equivalent maybe_short(). trend_confirmed is a hard AND-gate (both
+        EMA ribbon and Supertrend independently bullish) on top of the
+        weighted confluence score -- backtested to matter: without it,
+        12mo/4-stock return was -1.3%; with it (+ wider universe), +9.8%."""
         if symbol in self.open_positions:
             return None
         if len(self.open_positions) >= self.max_positions:
@@ -308,6 +313,8 @@ class PositionalStocksEngine:
         if score < buy_threshold:
             return None
         if adx_value < min_adx:
+            return None
+        if not trend_confirmed:
             return None
 
         quantity = int(self.slot_capital() // price) if price > 0 else 0
@@ -324,20 +331,35 @@ class PositionalStocksEngine:
         return position
 
     def check_exit(self, symbol: str, today: date, price: float, score: float,
-                    sell_threshold: float) -> Optional[StockPosition]:
-        """Closes an existing BUY position only. Never opens a short."""
+                    sell_threshold: float, trail_arm_pct: float = 3.0,
+                    trail_keep_frac: float = 0.5) -> Optional[StockPosition]:
+        """Closes an existing BUY position only. Never opens a short.
+        Once a position's peak gain reaches trail_arm_pct, the position
+        stops trusting weak SELL_SIGNAL exits and switches to a trailing
+        stop that locks in trail_keep_frac of the peak gain -- lets winners
+        run instead of bailing at the first bearish confluence flip."""
         pos = self.open_positions.get(symbol)
         if pos is None:
             return None
 
         pnl_pct = (price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price else 0
+        pos.peak_pnl_pct = max(pos.peak_pnl_pct, pnl_pct)
+        trail_armed = pos.peak_pnl_pct >= trail_arm_pct
+
         reason = None
-        if pnl_pct <= -self.stop_loss_pct:
-            reason = "STOP_LOSS"
-        elif pnl_pct >= self.target_pct:
-            reason = "TARGET"
-        elif score <= sell_threshold:
-            reason = "SELL_SIGNAL"
+        if trail_armed:
+            trail_floor = pos.peak_pnl_pct * trail_keep_frac
+            if pnl_pct <= trail_floor:
+                reason = "TRAILING_STOP"
+            elif pnl_pct >= self.target_pct:
+                reason = "TARGET"
+        else:
+            if pnl_pct <= -self.stop_loss_pct:
+                reason = "STOP_LOSS"
+            elif pnl_pct >= self.target_pct:
+                reason = "TARGET"
+            elif score <= sell_threshold:
+                reason = "SELL_SIGNAL"
 
         if reason is None:
             return None

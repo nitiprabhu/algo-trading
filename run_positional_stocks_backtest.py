@@ -25,15 +25,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from services.chartedge_core.models import Candle
 from services.chartedge_core.positional_stocks import compute_stock_signal
 
-SYMBOLS = ["RELIANCE", "HDFCBANK", "TCS", "INFY"]
+SYMBOLS = ["RELIANCE", "HDFCBANK", "TCS", "INFY", "ICICIBANK", "SBIN", "BHARTIARTL",
+           "ITC", "KOTAKBANK", "LT", "AXISBANK", "BAJFINANCE", "MARUTI", "ASIANPAINT",
+           "HCLTECH", "SUNPHARMA", "TITAN", "ULTRACEMCO", "WIPRO", "ADANIENT"]
 CAPITAL = 100_000.0
-MAX_POSITIONS = 4
-STOP_LOSS_PCT = 6.0
+MAX_POSITIONS = 8
+STOP_LOSS_PCT = 4.0
 TARGET_PCT = 12.0
-BUY_THRESHOLD = 0.50
-SELL_THRESHOLD = -0.50
-MIN_ADX = 20.0
-REPORT_MONTHS = 6
+BUY_THRESHOLD = 0.35
+SELL_THRESHOLD = -0.35
+MIN_ADX = 25.0
+REPORT_MONTHS = 12
+REQUIRE_TREND_GATE = True  # hard AND-gate: ema_ribbon + supertrend both bullish, not just weighted avg
 
 
 def load_daily_candles(symbol: str) -> list[Candle]:
@@ -48,6 +51,10 @@ def load_daily_candles(symbol: str) -> list[Candle]:
     return candles
 
 
+TRAIL_ARM_PCT = 3.0    # once up this much, stop trusting weak SELL_SIGNAL exits
+TRAIL_KEEP_FRAC = 0.5  # trailing stop locks in this fraction of peak gain
+
+
 class BacktestPosition:
     def __init__(self, symbol, entry_date, entry_price, quantity):
         self.symbol = symbol
@@ -59,6 +66,8 @@ class BacktestPosition:
         self.exit_reason = None
         self.pnl = 0.0
         self.pnl_pct = 0.0
+        self.peak_pnl_pct = 0.0
+        self.trail_armed = False
 
 
 def run_backtest():
@@ -86,13 +95,24 @@ def run_backtest():
             if symbol in open_positions:
                 pos = open_positions[symbol]
                 pnl_pct = (price - pos.entry_price) / pos.entry_price * 100
+                pos.peak_pnl_pct = max(pos.peak_pnl_pct, pnl_pct)
+                if pos.peak_pnl_pct >= TRAIL_ARM_PCT:
+                    pos.trail_armed = True
+
                 reason = None
-                if pnl_pct <= -STOP_LOSS_PCT:
-                    reason = "STOP_LOSS"
-                elif pnl_pct >= TARGET_PCT:
-                    reason = "TARGET"
-                elif score <= SELL_THRESHOLD:
-                    reason = "SELL_SIGNAL"
+                if pos.trail_armed:
+                    trail_floor = pos.peak_pnl_pct * TRAIL_KEEP_FRAC
+                    if pnl_pct <= trail_floor:
+                        reason = "TRAILING_STOP"
+                    elif pnl_pct >= TARGET_PCT:
+                        reason = "TARGET"
+                else:
+                    if pnl_pct <= -STOP_LOSS_PCT:
+                        reason = "STOP_LOSS"
+                    elif pnl_pct >= TARGET_PCT:
+                        reason = "TARGET"
+                    elif score <= SELL_THRESHOLD:
+                        reason = "SELL_SIGNAL"
                 if reason:
                     pos.exit_date = today
                     pos.exit_price = price
@@ -102,7 +122,10 @@ def run_backtest():
                     closed_positions.append(pos)
                     del open_positions[symbol]
             else:
-                if (score >= BUY_THRESHOLD and adx_value >= MIN_ADX
+                trend_ok = True
+                if REQUIRE_TREND_GATE:
+                    trend_ok = indicators["ema_ribbon"].vote == 1 and indicators["supertrend"].vote == 1
+                if (score >= BUY_THRESHOLD and adx_value >= MIN_ADX and trend_ok
                         and len(open_positions) < MAX_POSITIONS and price > 0):
                     qty = int(slot_capital // price)
                     if qty > 0:

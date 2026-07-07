@@ -73,9 +73,12 @@ class PositionalStocksRuntime:
             return
 
         symbols: list[str] = self.config.get("symbols", [])
-        buy_threshold = self.config.get("buy_threshold", 0.50)
-        sell_threshold = self.config.get("sell_threshold", -0.50)
-        min_adx = self.config.get("min_adx", 20.0)
+        buy_threshold = self.config.get("buy_threshold", 0.35)
+        sell_threshold = self.config.get("sell_threshold", -0.35)
+        min_adx = self.config.get("min_adx", 25.0)
+        require_trend_gate = self.config.get("require_trend_gate", True)
+        trail_arm_pct = self.config.get("trail_arm_pct", 3.0)
+        trail_keep_frac = self.config.get("trail_keep_frac", 0.5)
         weights = self.config.get("indicator_weights", {})
         yf_period = self.config.get("yfinance_period", "1y")
 
@@ -93,11 +96,20 @@ class PositionalStocksRuntime:
             adx_value = indicators["adx"].value
 
             if symbol in self.engine.open_positions:
-                closed = self.engine.check_exit(symbol, today, price, score, sell_threshold)
+                closed = self.engine.check_exit(
+                    symbol, today, price, score, sell_threshold,
+                    trail_arm_pct=trail_arm_pct, trail_keep_frac=trail_keep_frac,
+                )
                 if closed:
                     await self._notify_exit(closed)
             else:
-                opened = self.engine.maybe_enter(symbol, today, price, score, buy_threshold, adx_value, min_adx)
+                trend_confirmed = True
+                if require_trend_gate:
+                    trend_confirmed = indicators["ema_ribbon"].vote == 1 and indicators["supertrend"].vote == 1
+                opened = self.engine.maybe_enter(
+                    symbol, today, price, score, buy_threshold, adx_value, min_adx,
+                    trend_confirmed=trend_confirmed,
+                )
                 if opened:
                     await self._notify_entry(opened, score)
 

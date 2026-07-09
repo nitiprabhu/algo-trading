@@ -1,16 +1,28 @@
 # ChartEdge AI
 
-ChartEdge AI is a Phase 1 implementation of the NSE intraday technical-analysis PRD in `ChartEdge_AI_PRD_Architecture copy.pages`.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-What is built:
-- FastAPI backend with typed candle, indicator, signal, and paper-trade models.
-- Config-driven NIFTY and BANKNIFTY instruments, confluence thresholds, weights, and risk controls.
-- Multi-indicator engine: RSI, MACD, EMA ribbon, VWAP, Supertrend reference, volume, ATR, Bollinger reference.
-- Claude-compatible signal engine with deterministic rule-based fallback when `ANTHROPIC_API_KEY` is absent.
-- Paper trading engine with confidence floor, one open position per instrument, SL/T1/T2, T1 breakeven trail, and kill switch.
-- Next.js dashboard with signal feed, open positions, equity curve, trade log, metrics, and indicator confluence.
+NSE intraday + positional algo-trading platform for NIFTY/BANKNIFTY. Single-process FastAPI backend runs a live indicator → confluence → AI signal pipeline with paper-trade execution, plus fully isolated positional modules (weekly options, large-cap equity swing). Next.js dashboard for the live feed.
 
-## Run Locally
+**Status:** paper trading only. No live order placement.
+
+## What's built
+
+- FastAPI backend (`services/chartedge_core/api.py`) running one background market-data loop (mock simulator or live INDstocks feed).
+- Multi-indicator engine: RSI, MACD, EMA ribbon, VWAP, Supertrend, volume, ATR, Bollinger.
+- Weighted confluence scoring → BUY/SELL/HOLD, per-instrument thresholds in `shared/config.yaml`.
+- AI signal layer: Anthropic or OpenAI provider, optional multi-agent debate (bull/bear/judge), rule-based fallback when no API key is set.
+- Intraday paper trading: confidence floor, one open position per instrument, SL/T1/T2, breakeven trail, kill switch.
+- **Weekly options positional module** (`positional_trading.py`) — condor/straddle/credit-spread on nearest NIFTY weekly expiry. Own capital pool, own DB table, opt-in via config.
+- **Positional stocks module** (`positional_stocks.py`) — long-only large-cap equity swing trades (daily technical confluence). Own capital pool, own DB table, opt-in.
+- **Dynamic AI regime agent** — classifies market regime pre-session and adjusts the day's confluence threshold.
+- Postgres persistence (`DATABASE_URL`) with SQLite fallback for local dev; config can be overridden at runtime from the DB.
+- Telegram trade alerts (optional).
+- Next.js dashboard: live signal feed, open positions, equity curve, trade log, indicator confluence.
+
+See [CLAUDE.md](CLAUDE.md) for the full architecture breakdown and file-by-file module reference.
+
+## Run locally
 
 Backend:
 
@@ -24,123 +36,76 @@ Frontend:
 ```bash
 cd frontend
 npm install
-NEXT_PUBLIC_API_URL=http://localhost:7070 npm run dev
+NEXT_PUBLIC_API_URL=http://localhost:7000 npm run dev
 ```
 
-Open `http://localhost:9000`.
+Open `http://localhost:3000`.
+
+### Docker Compose
+
+```bash
+docker compose up
+```
+
+Spins up API on `localhost:7070` and frontend on `localhost:9000`.
 
 ## Environment
-
-Copy `.env.example` to `.env` and set local secrets there:
 
 ```bash
 cp .env.example .env
 ```
 
-Set `ANTHROPIC_API_KEY` to enable live Claude reasoning. Without it, signals are still generated from the confluence engine and marked `AI_UNAVAILABLE`.
+| Var | Purpose |
+|-----|---------|
+| `CHARTEDGE_DATA_SOURCE` | `mock` (default, local demo) or `indstocks` (live market data) |
+| `INDMONEY_TOKEN` | INDstocks API token, required for `indstocks` data source |
+| `ANTHROPIC_API_KEY` | Enables Claude reasoning; absent → deterministic rule-based fallback (`AI_UNAVAILABLE`) |
+| `OPENAI_API_KEY` | Alternative AI provider, selected via `ai.provider` in `shared/config.yaml` |
+| `DATABASE_URL` | PostgreSQL connection string; absent → local SQLite (`chartedge.db`) |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | Optional trade-entry/exit alerts |
 
-Set `CHARTEDGE_DATA_SOURCE=indstocks` and `INDMONEY_TOKEN` to use INDstocks historical backfill and live price websocket data. Keep `CHARTEDGE_DATA_SOURCE=mock` for local demo mode.
+## Tests & backtests
 
-`OPENAI_API_KEY` is optional. The AI brain is provider-swappable via `shared/config.yaml`; `anthropic` is the default provider and `openai` can be selected for comparison.
+```bash
+pytest                          # test suite
+python run_today_backtest.py    # replay today's data through the full pipeline
+python run_weekly_backtest.py
+python run_monthly_backtest.py
+python services/chartedge_core/backtest_runner.py   # full offline backtest runner
+```
 
-`INDMONEY_TOKEN` is used here only for INDstocks market data. The current Phase 1 build does not place live orders.
+Root-level `run_*.py` scripts are standalone backtest runners; see [CLAUDE.md](CLAUDE.md) for the complete list and backtesting conventions.
 
-## Next Integration Steps
+## Backtest results
 
-- Persist candles/signals/trades into TimescaleDB/PostgreSQL using `shared/db/schema.sql`.
-- Split the in-process services onto Redis Pub/Sub topics following the PRD event flow.
+All numbers below are from real NSE F&O bhavcopy settlement data (`data/nse_bhavcopy/`), not synthetic/Black-Scholes pricing. Full per-cycle detail and methodology in each linked report.
 
-## 📊 May 1 &mdash; May 12, 2026 Index Options Backtest Comparison
+**Headline: NIFTY weekly condor (the live default) is the strongest, most consistent result** — 75% win / +₹71,677 over 2 years (106 cycles), and 76% win / +₹41,265 over the most recent 1 year (54 cycles) in a separate report. Same strategy, same live default config, positive across both windows. BANKNIFTY weekly (same condor logic, different index) is *not* validated the same way — net -₹4,646 in the 1yr window despite a 69% win rate, so treat it as unproven rather than "the same edge on another index."
 
-We executed a comprehensive options backtest comparison for **NIFTY & BANKNIFTY** options over the 2-week window from May 1 to May 12, 2026. 
+| Module | Window | Result | Report |
+|---|---|---|---|
+| Weekly NIFTY Condor (`positional_trading.py`, live default) | Jul 2024–Jul 2026, 106 cycles | 75% win, +₹71,677 | [real_data_condor_backtest_2024-07_to_2026-07.md](reports/real_data_condor_backtest_2024-07_to_2026-07.md) |
+| Weekly NIFTY Straddle (`positional_trading.py`, opt-in) | Jul 2024–Jul 2026, 106 cycles | 64% win, +₹159,964 (undefined-risk, largest single-month loss -₹24,881) | [real_data_options_strategy_comparison_2024-07_to_2026-07.md](reports/real_data_options_strategy_comparison_2024-07_to_2026-07.md) |
+| Weekly NIFTY Credit Spread (`positional_trading.py`, opt-in) | Jul 2024–Jul 2026, 106 cycles | 83% win, +₹40,886, flattest equity curve | same report as above |
+| BANKNIFTY Monthly Condor | Jul 2024–Jul 2026, 21 cycles | 71% win, +₹10,806 | same report as above |
+| Positional Stocks swing (`positional_stocks.py`, live default) | 12mo, 20-stock universe, 50 trades | 60% win, +9.78% return, 2.10x profit factor | numbers from `shared/config.yaml` comment above `positional_stocks_risk:` — no standalone report file; reproduce with `python run_positional_stocks_backtest.py` |
+| Intraday futures swing (`futures_trader.py`) | Jul 2024–Jul 2026, 6 trades | 50% win, **net -₹22,721** (small sample) | [real_data_swing_futures_backtest_2024-07_to_2026-07.md](reports/real_data_swing_futures_backtest_2024-07_to_2026-07.md) |
+| Multi-symbol condor — **weekly expiry** (NIFTY, BANKNIFTY) | Jul 2025–Jul 2026 | NIFTY: 54 cycles, 76% win, +₹41,265. BANKNIFTY: 13 cycles, 69% win, **net -₹4,646** | [real_data_multi_symbol_condor_2025-07_to_2026-07.md](reports/real_data_multi_symbol_condor_2025-07_to_2026-07.md) |
+| Multi-symbol condor — **monthly expiry** (10 large-cap stocks, no weeklies exist for stock options in India) | Jul 2025–Jul 2026 | Best: HDFCBANK 85% win +₹23,430, INFY 69% win +₹30,220. Worst: SBIN 46% win **-₹74,663**, AXISBANK 46% win **-₹43,875** | same report as above |
 
-To isolate options-only performance, monitor equities (`RELIANCE` and `HDFCBANK`) were kept strictly in **monitor-only** mode.
+**Read before trusting these:** exits are checked once per trading day off EOD settlement prices (bhavcopy has no intraday ticks) — a daily-bar proxy for rules designed to run intraday, not an exact replay. Real VIX only available from mid-2025 onward; earlier months in the 2yr window fall back to a fixed VIX=15 estimate for strike sizing. See [reports/options_profitability_investigation_2026-06-02.md](reports/options_profitability_investigation_2026-06-02.md) for the deeper investigation into synthetic-vs-real data and regime-gating overfit risk that shaped these defaults.
 
-### 📈 Comparative Results Table
+## Deployment
 
-| Metric | Config A: Pure Options (No AI) | Config B: AI Guardrail (Single AI Review) |
-| :--- | :---: | :---: |
-| **Total Trades** | 14 | 0 |
-| **Winning Trades** | 7 | 0 |
-| **Losing Trades** | 7 | 0 |
-| **Win Rate %** | **50.0%** | **0.0%** |
-| **Total Net PnL (₹)** | **₹+3,238.30** | **₹+0.00** |
-| **Profit Factor** | 1.14 | 1.00 |
+Deploys to Render via [render.yaml](render.yaml) (Postgres + web service). `DATABASE_URL` and `INDMONEY_TOKEN` are configured through the Render dashboard; see the "Key env vars" table in [CLAUDE.md](CLAUDE.md).
 
-### 📅 Daily Net PnL Breakdown
+## Positional modules
 
-| Date | Config A: Pure Options (No AI) | Config B: AI Guardrail (Single AI) |
-| :---: | :---: | :---: |
-| **2026-05-01** | ₹+0.00 | ₹+0.00 |
-| **2026-05-04** | **₹+7,000.45** | ₹+0.00 |
-| **2026-05-05** | ₹-58.75 | ₹+0.00 |
-| **2026-05-06** | ₹-6,115.25 | ₹+0.00 |
-| **2026-05-07** | ₹-5,185.95 | ₹+0.00 |
-| **2026-05-08** | ₹-10,994.20 | ₹+0.00 |
-| **2026-05-11** | **₹+10,025.75** | ₹+0.00 |
-| **2026-05-12** | **₹+8,566.25** | ₹+0.00 |
+Both run independently of the intraday engine — separate capital pool, separate DB table each. Toggle via `shared/config.yaml`:
 
-### 📝 Executed Trades Log (Pure Options - No AI)
+- `positional_risk.enabled` — weekly NIFTY options (condor/straddle/credit_spread), currently **on**.
+- `positional_stocks_risk.enabled` — large-cap equity swing (yfinance-based, no API token needed), currently **on**.
 
-| Date | Instrument / Option Contract | Type | Qty | Entry Prem | Exit Prem | Net P&L (₹) | Exit Reason |
-| :---: | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| **05-04** | `NIFTY-May2026-24250-CE` | BUY | 100 | 291.32 | 343.17 | **₹+5,185.00** | Theta Mitigation (45m) |
-| **05-04** | `BANKNIFTY-May2026-54900-PE` | BUY | 105 | 659.49 | 676.78 | **₹+1,815.45** | Theta Mitigation (45m) |
-| **05-05** | `NIFTY-May2026-23950-PE` | BUY | 125 | 287.35 | 286.88 | **₹-58.75** | Theta Mitigation (45m) |
-| **05-06** | `NIFTY-May2026-24150-PE` | BUY | 175 | 289.84 | 287.32 | **₹-441.00** | Theta Mitigation (45m) |
-| **05-06** | `NIFTY-May2026-24350-CE` | BUY | 250 | 292.16 | 296.91 | **₹+1,187.50** | EOD Square-Off (15:00) |
-| **05-06** | `BANKNIFTY-May2026-55800-CE` | BUY | 105 | 670.29 | 604.94 | **₹-6,861.75** | EOD Square-Off (15:00) |
-| **05-07** | `NIFTY-May2026-24300-PE` | BUY | 150 | 291.69 | 257.53 | **₹-5,124.00** | Theta Mitigation (45m) |
-| **05-07** | `BANKNIFTY-May2026-56100-CE` | BUY | 105 | 673.38 | 672.79 | **₹-61.95** | Expiry Hard Exit |
-| **05-08** | `NIFTY-May2026-24150-PE` | BUY | 200 | 290.01 | 275.59 | **₹-2,884.00** | Theta Mitigation (45m) |
-| **05-08** | `BANKNIFTY-May2026-55100-PE` | BUY | 105 | 661.30 | 584.06 | **₹-8,110.20** | Stop Loss (SL) |
-| **05-11** | `NIFTY-May2026-23900-PE` | BUY | 200 | 286.72 | 289.73 | **₹+602.00** | Theta Mitigation (45m) |
-| **05-11** | `BANKNIFTY-May2026-54900-CE` | BUY | 105 | 659.17 | 748.92 | **₹+9,423.75** | Theta Mitigation (45m) |
-| **05-12** | `NIFTY-May2026-23600-PE` | BUY | 125 | 283.44 | 290.99 | **₹+943.75** | Theta Mitigation (45m) |
-| **05-12** | `NIFTY-May2026-23450-PE` | BUY | 250 | 281.63 | 312.12 | **₹+7,622.50** | EOD Square-Off (15:00) |
+## License
 
-### 🔍 Core Analytical Findings & Dual Insight
-
-1. **🛡️ Config B: Flawless Loss Elimination on Choppy Days (May 5–8)**
-   During the choppy and sideways market phase between May 5 and May 8, standard breakouts suffered multi-day losses under Config A. 
-   * **The AI Single Review system perfectly recognized the high-risk, low-volume setups, vetoing every single trade.**
-   * This successfully protected and preserved capital with a clean **₹0.00** drawdown.
-
-2. **🚀 Config A: Powerful Breakout Maximization on Trending Days (May 4, 11, 12)**
-   When clear institutional momentum triggered high-volume breakouts on May 4, 11, and 12:
-   * The AI review system's strict volatility filters (e.g. India VIX > 18) were overly conservative and vetoed these massive trending trades.
-   * By bypassing the AI, **Config A successfully captured the full trending moves, ending with an overall positive net P&L of ₹+3,238.30**.
-
-3. **💡 Strategic Hybrid Recommendation:**
-   Use a **dynamic AI filter threshold**:
-   * Enable AI vetting for individual stocks (equities) or when the standard indicator confluence score is low ($< 0.7$).
-   * Allow **direct breakout options execution (bypassing AI review)** specifically when the indicator confluence score is extremely strong ($> 0.8$), even if market volatility (VIX) is elevated, as index options excel under high-volatility breakout setups.
-
----
-
-## 🤖 Dynamic AI Regime Agent & Option Buying Optimizations (May 2026)
-
-We have successfully designed, validated, and integrated the **Dynamic AI Regime Agent** and optimized the **Option Buying** strategy configuration in the live market runtime:
-
-### 1. Dynamic AI Regime Agent Integration
-* **Mechanism:** Rather than using a rigid, hardcoded confluence threshold (e.g., a static `0.55` or `0.70`), the system now dynamically calculates a session baseline threshold at startup.
-* **Analysis Factors:** The agent queries the OpenAI API at boot, providing the previous day's VIX levels, index opening returns, and intraday range.
-* **Behavior:** 
-  * On high-momentum trend days, it lowers the threshold (e.g., to `0.42` or `0.44`) to enter trades early and maximize breakout PnL.
-  * On choppy, mean-reverting, or high-risk days, it raises the threshold (e.g., to `0.56` or higher) to keep the system sidelined and protect trading capital.
-* **Live Startup Integration:** Embedded inside the `seed()` startup completion hook in `services/chartedge_core/indstocks.py`. The server automatically runs the analysis and outputs the day's baseline regime class and target threshold before the websocket price stream starts processing live ticks.
-
-### 2. Option-Buying Premium Risk Management
-To align with high-volatility Option Buying requirements (long CE/PE contracts only), the risk management pipeline (`services/chartedge_core/paper_trading.py`) enforces strict premium-domain tracking:
-* **Stop Loss:** 15% max hard stop on the entry premium.
-* **Target 1:** 15% (activates cost/breakeven lock once premium reaches `+8%` highest PnL to prevent decay).
-* **Target 2:** 30% take-profit limit.
-* **Trailing Stop Loss Levels:**
-  * If peak premium gain $\ge$ 8% $\to$ trail SL to cost (breakeven).
-  * If peak premium gain $\ge$ 15% $\to$ trail SL to secure `+7%` profit.
-  * If peak premium gain $\ge$ 25% $\to$ trail SL to secure `+15%` profit.
-
-### 📊 Validation Results Summary
-* **May 1–19, 2026 Backtest:** Dynamic AI Regime Agent generated **+₹5,344.70** PnL (33.3% Win Rate) vs. Fixed `0.50` threshold losing **-₹2,207.50** (due to over-trading during mid-month sideways churn).
-* **April 2026 Backtest:** Dynamic AI Regime Agent limited net monthly losses to **-₹7,048.70** (shielding the portfolio and cutting drawdown by **56.2%**) vs. Fixed `0.56` threshold losing **-₹16,100.75** (due to missing critical trend moves).
-
+MIT — see [LICENSE](LICENSE).

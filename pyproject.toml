@@ -16,6 +16,7 @@ dependencies = [
   "sqlmodel>=0.0.22",
   "pandas>=2.0.0",
   "numpy>=1.26.0",
+  "yfinance>=0.2.40",
 ]
 
 [project.optional-dependencies]
@@ -35,3 +36,6 @@ exclude = ["frontend*", "shared*", "tests*", "extracted_pages*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.poetry]
+package-mode = false

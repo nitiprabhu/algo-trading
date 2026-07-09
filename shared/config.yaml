@@ -39,6 +39,11 @@ instruments:
     enabled: true
     role: monitor
     timeframes: [1m]
+  # Note: TCS/INFY are NOT listed here. positional_stocks.py (long-only
+  # technical-investment module) fetches its own daily OHLCV directly from
+  # yfinance (see positional_stocks_risk.symbols below) -- it does not use
+  # this instruments: list or the INDmoney/indstocks feed at all, so no
+  # NSE historical_scrip_code/websocket_token is needed for those symbols.
   - symbol: INDIAVIX
     display_name: India VIX
     exchange: NSE
@@ -159,6 +164,43 @@ positional_risk:
   stop_credit_mult: 1.1   # tighter stop for lower per-trade pain; see positional_trading.py comment
   short_sigma_mult: 0.85
   wing_sigma_mult: 1.30
+
+positional_stocks_risk:
+  # Large-cap technical INVESTMENT -- long-only, daily-swing signals. Fully
+  # separate module (positional_stocks.py), separate capital pool, own DB
+  # table (StockPositionRecord). BUY-only: a position can only be opened by
+  # a BUY signal; SELL signals only close an existing position, never open
+  # a short. See positional_stocks.py module docstring for the full
+  # indicator/pattern list (RSI, MACD, EMA, Supertrend, ADX, Golden Cross,
+  # 52-week range, Donchian breakout, Bollinger squeeze, MA pullback, Cup &
+  # Handle).
+  #
+  # Data source: yfinance (NSE tickers, e.g. RELIANCE.NS) -- NOT the
+  # INDmoney/indstocks feed used by intraday/options. No API token, no
+  # daily expiry, no manual re-auth: fully unattended.
+  #
+  # Params below are backtest-validated on 2yr real NSE daily data
+  # (run_positional_stocks_backtest.py): 20-stock universe, 12mo window ->
+  # 50 trades, 60% win rate, +9.78% return, 2.10x profit factor. The
+  # 4-stock/no-trend-gate version tested first (RELIANCE/HDFCBANK/TCS/INFY,
+  # threshold 0.50, no require_trend_gate) was NEGATIVE (-1.3% to -5.5%
+  # across 6/12/24mo windows) -- wider universe + hard trend gate + trailing
+  # stop is what flipped it profitable. Do not shrink the universe or drop
+  # require_trend_gate without re-backtesting.
+  enabled: true
+  capital: 100000.0       # separate allocation, not shared with intraday or options positional capital
+  max_positions: 5        # equal-slot capital sizing: capital / max_positions per stock
+  stop_loss_pct: 4.0
+  target_pct: 12.0
+  buy_threshold: 0.35
+  sell_threshold: -0.35
+  min_adx: 25.0           # skip BUY entries when ADX below this (avoid chop)
+  require_trend_gate: true  # hard AND-gate: EMA ribbon + Supertrend both bullish, not just weighted score
+  trail_arm_pct: 3.0      # once a position peaks at +3%, stop trusting weak SELL_SIGNAL exits
+  trail_keep_frac: 0.5    # trailing stop locks in 50% of peak gain once armed
+  yfinance_period: "2y"   # daily bars pulled per check; 2y gives Golden Cross/Cup&Handle enough history
+  symbols: [SBIN, ADANIENT, VEDL, ONGC, HINDALCO]  # top 5 by 12mo backtest CAGR (22.69%)
+  check_after_time: "15:35"  # IST cutoff -- runs once per day after this time, not every 5 min
 
 futures_risk:
   NIFTY_FUT:

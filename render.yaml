@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: algo-trading
+    runtime: python312
+    buildCommand: poetry install --no-root --with dev && npm --prefix frontend install
+    startCommand: uvicorn services.chartedge_core.api:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: CHARTEDGE_DATA_SOURCE
+        value: indstocks
+      - key: DATABASE_URL
+        fromDatabase:
+          name: algo-trading-db
+          property: connectionString
+      - key: INDMONEY_TOKEN
+        scope: pr
+        value: # User inputs via UI or /api/config/indmoney-token
+
+  - type: pserv
+    name: algo-trading-db
+    ipAllowList: [] # Allow all
+    plan: standard
+    postgresVersion: 16
+
+  - type: redis
+    name: algo-trading-cache
+    plan: starter # Optional, for future caching

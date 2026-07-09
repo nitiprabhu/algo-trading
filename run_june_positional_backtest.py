@@ -44,10 +44,9 @@ for zpath in zips:
 
 dates = sorted(chain.keys())
 
-# Run all 3 strategies
+# Run all 3 strategies (in-memory backtest, no DB persistence)
 strategies = ["condor", "straddle", "credit_spread"]
-engines = {s: PositionalTradingEngine(capital=100000.0, log_path=f"/tmp/positional_{s}_june.json",
-                                      strategy_name=s) for s in strategies}
+engines = {s: PositionalTradingEngine(capital=100000.0, strategy_name=s) for s in strategies}
 
 for s in strategies:
     engines[s].closed_trades = []
@@ -166,10 +165,3 @@ for strat_name in ["condor", "straddle", "credit_spread"]:
 print(f"\n{'='*90}")
 print("✅ BACKTEST COMPLETE")
 print(f"{'='*90}\n")
-
-# Cleanup
-import os
-for strat in strategies:
-    path = f"/tmp/positional_{strat}_june.json"
-    if os.path.exists(path):
-        os.remove(path)

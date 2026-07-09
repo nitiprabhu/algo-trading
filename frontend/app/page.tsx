@@ -203,6 +203,11 @@ export default function DashboardPage() {
               <TrendingUp size={18} /> Strategies
             </button>
           </Link>
+          <Link href="/positional-stocks">
+            <button style={{ background: "rgba(77, 148, 191, 0.15)", borderColor: "var(--accent)", color: "var(--text)" }}>
+              <TrendingUp size={18} /> Positional Stocks
+            </button>
+          </Link>
           <span className={`feed ${wsLive ? "on" : "off"}`}>
             <Wifi size={16} /> {snapshot.feed_health}
             <small style={{ marginLeft: '4px', opacity: 0.7 }}>

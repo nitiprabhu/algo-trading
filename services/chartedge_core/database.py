@@ -10,14 +10,24 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select, UniqueCons
 load_dotenv()
 
 class DynamicParameter(SQLModel, table=True):
-    __table_args__ = (UniqueConstraint("category", "key", "instrument"),)
-    
+    __table_args__ = (UniqueConstraint("category", "key", "instrument"), {'extend_existing': True})
+
     id: Optional[int] = Field(default=None, primary_key=True)
     category: str = Field(index=True)  # e.g., 'confluence', 'indicator_weights', 'risk'
     key: str = Field(index=True)       # e.g., 'buy_threshold', 'rsi', 'notional_per_trade'
     value: str                         # The actual parameter value (stored as string)
     instrument: Optional[str] = Field(default=None, index=True)  # Optional, for per-instrument overrides
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class IndmoneyToken(SQLModel, table=True):
+    """API token for INDmoney access. TTL: 1 day. Fallback to env var if missing."""
+    __table_args__ = {'extend_existing': True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    token: str = Field(unique=True, index=True)
+    issued_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime  # Set to issued_at + 1 day
 
 
 print("DEBUG: database.py: Loading module")
@@ -95,6 +105,7 @@ def batch_update_parameters(params_list: List[tuple[str, str, Any, Optional[str]
 
 class TradeRecord(SQLModel, table=True):
     """Persists every paper trade entry and exit to the database."""
+    __table_args__ = {'extend_existing': True}
 
     id: Optional[int] = Field(default=None, primary_key=True)
     trade_id: str = Field(index=True, unique=True)  # UUID from PaperTrade
@@ -247,6 +258,257 @@ def get_trades_for_date(date_str: str) -> List[TradeRecord]:
         return []
 
 
+# ── Positional Trading (Weekly Options) ────────────────────────────────────────
+
+class PositionalTradeRecord(SQLModel, table=True):
+    """Weekly NIFTY options positional trades (Condor/Straddle/Credit Spread). TTL: 30 days after close."""
+    __table_args__ = {'extend_existing': True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    trade_id: str = Field(index=True, unique=True)  # UUID
+    strategy: str  # "condor", "straddle", "credit_spread"
+    entry_date: str  # YYYY-MM-DD
+    expiry: str  # YYYY-MM-DD (weekly expiry date)
+    spot_at_entry: float
+    vix_at_entry: float
+    legs_json: str  # JSON serialized list of legs: [{"strike": 50.0, "option_type": "CE", "side": "SHORT"}, ...]
+    credit: float  # Premium received on entry
+    quantity: int = 75  # NIFTY lot size
+    status: str = "OPEN"  # OPEN or CLOSED
+    exit_date: Optional[str] = None  # YYYY-MM-DD
+    debit: Optional[float] = None  # Cost to close
+    exit_reason: Optional[str] = None  # "PROFIT_TAKE", "STOP", "EXPIRY", etc.
+    pnl: float = 0.0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: Optional[datetime] = None  # Auto-set on close: updated_at + 30 days
+
+
+def persist_positional_entry(trade) -> Optional[PositionalTradeRecord]:
+    """Save weekly options trade entry."""
+    if not DATABASE_URL:
+        return None
+    try:
+        import json
+        with Session(engine) as session:
+            legs_json = json.dumps([
+                {"strike": leg.strike, "option_type": leg.option_type, "side": leg.side}
+                for leg in trade.legs
+            ])
+            record = PositionalTradeRecord(
+                trade_id=trade.id,
+                strategy=trade.strategy,
+                entry_date=trade.entry_date,
+                expiry=trade.expiry,
+                spot_at_entry=trade.spot_at_entry,
+                vix_at_entry=trade.vix_at_entry,
+                legs_json=legs_json,
+                credit=trade.credit,
+                quantity=trade.quantity,
+                status="OPEN"
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+    except Exception as e:
+        print(f"⚠️ Failed to persist positional trade entry: {e}")
+        return None
+
+
+def persist_positional_exit(trade_id: str, exit_date: str, debit: float,
+                           exit_reason: str, pnl: float) -> Optional[PositionalTradeRecord]:
+    """Update positional trade with exit details."""
+    if not DATABASE_URL:
+        return None
+    try:
+        with Session(engine) as session:
+            statement = select(PositionalTradeRecord).where(PositionalTradeRecord.trade_id == trade_id)
+            record = session.exec(statement).first()
+            if not record:
+                return None
+            record.status = "CLOSED"
+            record.exit_date = exit_date
+            record.debit = debit
+            record.exit_reason = exit_reason
+            record.pnl = pnl
+            record.updated_at = datetime.utcnow()
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+    except Exception as e:
+        print(f"⚠️ Failed to persist positional trade exit: {e}")
+        return None
+
+
+def get_open_positional_trades() -> List[PositionalTradeRecord]:
+    """Fetch all open positional trades."""
+    if not DATABASE_URL:
+        return []
+    try:
+        with Session(engine) as session:
+            statement = select(PositionalTradeRecord).where(PositionalTradeRecord.status == "OPEN")
+            results = session.exec(statement)
+            return list(results.all())
+    except Exception as e:
+        print(f"⚠️ Failed to fetch open positional trades: {e}")
+        return []
+
+
+def get_closed_positional_trades(limit: int = 50) -> List[PositionalTradeRecord]:
+    """Fetch recent closed positional trades."""
+    if not DATABASE_URL:
+        return []
+    try:
+        with Session(engine) as session:
+            statement = (
+                select(PositionalTradeRecord)
+                .where(PositionalTradeRecord.status == "CLOSED")
+                .order_by(PositionalTradeRecord.exit_date.desc())
+                .limit(limit)
+            )
+            results = session.exec(statement)
+            return list(results.all())
+    except Exception as e:
+        print(f"⚠️ Failed to fetch closed positional trades: {e}")
+        return []
+
+
+# ── Positional Stocks (Long-Only Technical Investment) ─────────────────────────
+
+class StockPositionRecord(SQLModel, table=True):
+    """Large-cap technical investment positions (BUY/SELL long-only). TTL: 180 days after close."""
+    __table_args__ = {'extend_existing': True}
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    position_id: str = Field(index=True, unique=True)  # UUID
+    symbol: str = Field(index=True)  # e.g., SBIN, VEDL, ONGC
+    entry_date: str  # YYYY-MM-DD
+    entry_price: float
+    quantity: int
+    status: str = "OPEN"  # OPEN or CLOSED
+    exit_date: Optional[str] = None  # YYYY-MM-DD
+    exit_price: Optional[float] = None
+    exit_reason: Optional[str] = None  # "TARGET", "STOP_LOSS", "TRAILING_STOP", "SELL_SIGNAL"
+    pnl: float = 0.0
+    pnl_pct: float = 0.0
+    peak_pnl_pct: float = 0.0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: Optional[datetime] = None  # Auto-set on close: updated_at + 180 days
+
+
+def persist_stock_entry(symbol: str, entry_date: str, entry_price: float, quantity: int) -> Optional[StockPositionRecord]:
+    """Save stock position entry."""
+    if not DATABASE_URL:
+        return None
+    try:
+        from uuid import uuid4
+        with Session(engine) as session:
+            record = StockPositionRecord(
+                position_id=str(uuid4()),
+                symbol=symbol,
+                entry_date=entry_date,
+                entry_price=entry_price,
+                quantity=quantity,
+                status="OPEN"
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+    except Exception as e:
+        print(f"⚠️ Failed to persist stock entry: {e}")
+        return None
+
+
+def persist_stock_exit(position_id: str, exit_date: str, exit_price: float,
+                      exit_reason: str, pnl: float, pnl_pct: float,
+                      peak_pnl_pct: float) -> Optional[StockPositionRecord]:
+    """Update stock position with exit details."""
+    if not DATABASE_URL:
+        return None
+    try:
+        from datetime import timedelta
+        with Session(engine) as session:
+            statement = select(StockPositionRecord).where(StockPositionRecord.position_id == position_id)
+            record = session.exec(statement).first()
+            if not record:
+                return None
+            record.status = "CLOSED"
+            record.exit_date = exit_date
+            record.exit_price = exit_price
+            record.exit_reason = exit_reason
+            record.pnl = pnl
+            record.pnl_pct = pnl_pct
+            record.peak_pnl_pct = peak_pnl_pct
+            record.updated_at = datetime.utcnow()
+            record.expires_at = record.updated_at + timedelta(days=180)  # 6-month TTL
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+    except Exception as e:
+        print(f"⚠️ Failed to persist stock exit: {e}")
+        return None
+
+
+def get_open_stock_positions() -> List[StockPositionRecord]:
+    """Fetch all open stock positions."""
+    if not DATABASE_URL:
+        return []
+    try:
+        with Session(engine) as session:
+            statement = select(StockPositionRecord).where(StockPositionRecord.status == "OPEN")
+            results = session.exec(statement)
+            return list(results.all())
+    except Exception as e:
+        print(f"⚠️ Failed to fetch open stock positions: {e}")
+        return []
+
+
+def get_closed_stock_positions(limit: int = 100) -> List[StockPositionRecord]:
+    """Fetch recent closed stock positions."""
+    if not DATABASE_URL:
+        return []
+    try:
+        with Session(engine) as session:
+            statement = (
+                select(StockPositionRecord)
+                .where(StockPositionRecord.status == "CLOSED")
+                .order_by(StockPositionRecord.exit_date.desc())
+                .limit(limit)
+            )
+            results = session.exec(statement)
+            return list(results.all())
+    except Exception as e:
+        print(f"⚠️ Failed to fetch closed stock positions: {e}")
+        return []
+
+
+# ── TTL Cleanup ────────────────────────────────────────────────────────────────
+
+def cleanup_expired_records():
+    """Delete records past their TTL (call periodically)."""
+    if not DATABASE_URL:
+        return
+    try:
+        from sqlalchemy import delete
+        now = datetime.utcnow()
+        with Session(engine) as session:
+            # Delete expired positional trades (30 days after close)
+            session.exec(delete(PositionalTradeRecord).where(PositionalTradeRecord.expires_at <= now))
+
+            # Delete expired stock positions (180 days after close)
+            session.exec(delete(StockPositionRecord).where(StockPositionRecord.expires_at <= now))
+
+            session.commit()
+            print("✓ Expired records cleaned up")
+    except Exception as e:
+        print(f"⚠️ Failed to cleanup expired records: {e}")
+
+
 def get_daily_performance() -> List[dict]:
     """Get profit/loss grouped by date and symbol."""
     if not DATABASE_URL:
@@ -283,7 +545,7 @@ def clear_all_trades():
     """Wipe all trade records from the database."""
     if not DATABASE_URL:
         pass
-    
+
     try:
         with Session(engine) as session:
             # Delete all from TradeRecord
@@ -293,3 +555,60 @@ def clear_all_trades():
             print("🧨 All trade records cleared from database.")
     except Exception as e:
         print(f"⚠️ Failed to clear trades: {e}")
+
+
+# ── INDmoney Token Management ──────────────────────────────────────────────────
+
+def set_indmoney_token(token: str) -> Optional[IndmoneyToken]:
+    """Store INDmoney API token in DB with 1-day expiry."""
+    if not DATABASE_URL:
+        return None
+    try:
+        from datetime import timedelta
+        with Session(engine) as session:
+            # Clear old tokens
+            from sqlalchemy import delete
+            session.execute(delete(IndmoneyToken))
+
+            # Store new token
+            expires_at = datetime.utcnow() + timedelta(days=1)
+            record = IndmoneyToken(token=token, expires_at=expires_at)
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            print(f"✓ INDmoney token stored (expires: {expires_at})")
+            return record
+    except Exception as e:
+        print(f"⚠️ Failed to store token: {e}")
+        return None
+
+
+def get_indmoney_token() -> Optional[str]:
+    """Get valid INDmoney token from DB. Returns None if expired or missing."""
+    if not DATABASE_URL:
+        return None
+    try:
+        with Session(engine) as session:
+            now = datetime.utcnow()
+            statement = select(IndmoneyToken).where(IndmoneyToken.expires_at > now)
+            record = session.exec(statement).first()
+            if record:
+                return record.token
+            return None
+    except Exception as e:
+        print(f"⚠️ Failed to fetch token: {e}")
+        return None
+
+
+def cleanup_expired_token():
+    """Delete expired INDmoney tokens."""
+    if not DATABASE_URL:
+        return
+    try:
+        from sqlalchemy import delete
+        now = datetime.utcnow()
+        with Session(engine) as session:
+            session.execute(delete(IndmoneyToken).where(IndmoneyToken.expires_at <= now))
+            session.commit()
+    except Exception as e:
+        print(f"⚠️ Failed to cleanup token: {e}")

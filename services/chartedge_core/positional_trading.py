@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 from dataclasses import dataclass, asdict
 from datetime import datetime, date, timedelta
 from typing import Callable, Optional
@@ -164,10 +163,10 @@ class PositionalTradingEngine:
     """
     Owns its own capital, positions, and trade log. Does not touch
     PaperTradingEngine, FuturesTradingEngine, or their DB tables.
+    Persists to PositionalTradeRecord table (30-day TTL after close).
     """
 
-    def __init__(self, capital: float = 100000.0, log_path: str = "data/positional_trades.json",
-                 strategy_name: str = "condor"):
+    def __init__(self, capital: float = 100000.0, strategy_name: str = "condor"):
         if strategy_name not in STRATEGIES:
             raise ValueError(f"Unknown positional strategy: {strategy_name!r}, expected one of {list(STRATEGIES)}")
         self.capital = capital
@@ -175,29 +174,33 @@ class PositionalTradingEngine:
         self.strategy = STRATEGIES[strategy_name]()
         self.open_trade: Optional[PositionalTrade] = None
         self.closed_trades: list[PositionalTrade] = []
-        self.log_path = log_path
         self._load()
 
     def _load(self) -> None:
-        if os.path.exists(self.log_path):
-            with open(self.log_path) as f:
-                data = json.load(f)
-            for t in data.get("closed", []):
-                t["legs"] = [Leg(**leg) for leg in t["legs"]]
-                self.closed_trades.append(PositionalTrade(**t))
-            if data.get("open"):
-                o = data["open"]
-                o["legs"] = [Leg(**leg) for leg in o["legs"]]
-                self.open_trade = PositionalTrade(**o)
+        from services.chartedge_core.database import get_open_positional_trades, get_closed_positional_trades, create_db_and_tables
+        create_db_and_tables()  # idempotent
 
-    def _save(self) -> None:
-        os.makedirs(os.path.dirname(self.log_path) or ".", exist_ok=True)
-        data = {
-            "open": self.open_trade.to_dict() if self.open_trade else None,
-            "closed": [t.to_dict() for t in self.closed_trades],
-        }
-        with open(self.log_path, "w") as f:
-            json.dump(data, f, indent=2)
+        # Load open trade
+        open_records = get_open_positional_trades()
+        if open_records:
+            rec = open_records[0]  # should be at most 1 open trade
+            legs_data = json.loads(rec.legs_json)
+            self.open_trade = PositionalTrade(
+                id=rec.trade_id, strategy=rec.strategy, entry_date=rec.entry_date,
+                expiry=rec.expiry, spot_at_entry=rec.spot_at_entry, vix_at_entry=rec.vix_at_entry,
+                legs=[Leg(**leg) for leg in legs_data], credit=rec.credit, quantity=rec.quantity, status=rec.status
+            )
+
+        # Load closed trades
+        for rec in get_closed_positional_trades(limit=1000):
+            legs_data = json.loads(rec.legs_json)
+            self.closed_trades.append(PositionalTrade(
+                id=rec.trade_id, strategy=rec.strategy, entry_date=rec.entry_date,
+                expiry=rec.expiry, spot_at_entry=rec.spot_at_entry, vix_at_entry=rec.vix_at_entry,
+                legs=[Leg(**leg) for leg in legs_data], credit=rec.credit, quantity=rec.quantity,
+                status=rec.status, exit_date=rec.exit_date, debit=rec.debit,
+                exit_reason=rec.exit_reason, pnl=rec.pnl
+            ))
 
     def maybe_enter(
         self, today: date, spot: float, vix: float, chain_premiums: dict[float, dict[str, float]],
@@ -232,7 +235,8 @@ class PositionalTradingEngine:
             spot_at_entry=spot, vix_at_entry=vix, legs=legs, credit=round(credit, 2), quantity=LOT_SIZE,
         )
         self.open_trade = trade
-        self._save()
+        from services.chartedge_core.database import persist_positional_entry
+        persist_positional_entry(trade)
         return trade
 
     def mark_to_market(self, today: date, chain_premiums: dict[float, dict[str, float]]) -> Optional[PositionalTrade]:
@@ -263,9 +267,12 @@ class PositionalTradingEngine:
         t.exit_reason = reason
         t.pnl = round((t.credit - debit) * t.quantity, 2)
         t.status = "CLOSED"
+
+        from services.chartedge_core.database import persist_positional_exit
+        persist_positional_exit(t.id, t.exit_date, t.debit, t.exit_reason, t.pnl)
+
         self.closed_trades.append(t)
         self.open_trade = None
-        self._save()
         return t
 
     def metrics(self) -> dict:

@@ -22,6 +22,21 @@ shared/config.yaml `positional_risk.strategy`:
   "credit_spread" Single-side (put-spread if 5d uptrend else call-spread),
                    defined risk, lowest variance. 106 cycles, 83% win,
                    +Rs 40,886/2yr — weaker return but flattest equity curve.
+  "iv_gated_straddle"  Short ATM straddle, but ONLY enters when straddle
+                   premium / spot >= 1.3% (rich-IV weeks only; skips ~63%
+                   of cycles). 150% stop (vs 110% for the other variants --
+                   this is the value tested in the 2yr study, wider because
+                   the gate already filters out the weeks that need a tight
+                   stop). UNDEFINED RISK like "straddle". 2yr backtest: 38
+                   filtered cycles (of 103), 74% win, +Rs 298,295, avg
+                   +Rs 7,850/cycle -- best Sharpe (1.10) of all 4 variants,
+                   and the only one that stayed net positive through the
+                   2026 H1 bear chop (+Rs 60,746) where the unfiltered
+                   straddle and credit_spread both struggled. Lean-premium
+                   weeks (excluded by the gate) were net losers as a group
+                   in the study (-Rs 44,450), confirming the gate carries
+                   the edge, not the straddle itself.
+                   See memory/bhavcopy_pattern_study_2026_07.md.
 
 Flow (same for all variants):
   1. strategy.is_entry_day() — first trading day after prior cycle's expiry.
@@ -99,6 +114,13 @@ def _strike_set(legs: list[Leg]) -> set[float]:
 
 class WeeklyCondorStrategy:
     name = "condor"
+    profit_take_frac = PROFIT_TAKE_FRAC
+    stop_credit_mult = STOP_CREDIT_MULT
+
+    def should_enter(self, spot: float, credit: float) -> bool:
+        """Extra gate checked after credit is known, before opening the trade.
+        Default: always enter (existing variants are unaffected)."""
+        return True
 
     def next_expiry(self, from_date: date) -> date:
         days_ahead = (NIFTY_WEEKLY_EXPIRY_WEEKDAY - from_date.weekday()) % 7
@@ -152,10 +174,27 @@ class WeeklyCreditSpreadStrategy(WeeklyCondorStrategy):
         return [Leg(atm + short_off, "CE", "SHORT"), Leg(atm + wing_off, "CE", "LONG")]
 
 
+class IVGatedStraddleStrategy(WeeklyStraddleStrategy):
+    """Short ATM straddle, entered only when the straddle premium is rich
+    relative to spot (implied weekly move >= IV_GATE_PCT). 2yr study found
+    the variance-risk-premium edge concentrates almost entirely in these
+    weeks; lean-premium weeks are net losers as a group. Wider 150% stop --
+    tighter stops don't cap the tail in this variant, they just cut into the
+    weeks the gate was designed to keep. See memory/bhavcopy_pattern_study_2026_07.md."""
+    name = "iv_gated_straddle"
+    IV_GATE_PCT = 0.013          # straddle credit / spot must be >= 1.3%
+    stop_credit_mult = 1.5       # vs 1.1 for the other variants
+    profit_take_frac = 1.0       # effectively disabled -- study held to expiry/stop only
+
+    def should_enter(self, spot: float, credit: float) -> bool:
+        return spot > 0 and (credit / spot) >= self.IV_GATE_PCT
+
+
 STRATEGIES = {
     "condor": WeeklyCondorStrategy,
     "straddle": WeeklyStraddleStrategy,
     "credit_spread": WeeklyCreditSpreadStrategy,
+    "iv_gated_straddle": IVGatedStraddleStrategy,
 }
 
 
@@ -180,10 +219,12 @@ class PositionalTradingEngine:
         from services.chartedge_core.database import get_open_positional_trades, get_closed_positional_trades, create_db_and_tables
         create_db_and_tables()  # idempotent
 
-        # Load open trade
-        open_records = get_open_positional_trades()
+        # Scoped to this engine's own strategy -- required when multiple
+        # engines run in parallel (positional_risk.mode: parallel), otherwise
+        # each engine would load another strategy's open/closed trades.
+        open_records = get_open_positional_trades(strategy=self.strategy_name)
         if open_records:
-            rec = open_records[0]  # should be at most 1 open trade
+            rec = open_records[0]  # should be at most 1 open trade per strategy
             legs_data = json.loads(rec.legs_json)
             self.open_trade = PositionalTrade(
                 id=rec.trade_id, strategy=rec.strategy, entry_date=rec.entry_date,
@@ -192,7 +233,7 @@ class PositionalTradingEngine:
             )
 
         # Load closed trades
-        for rec in get_closed_positional_trades(limit=1000):
+        for rec in get_closed_positional_trades(limit=1000, strategy=self.strategy_name):
             legs_data = json.loads(rec.legs_json)
             self.closed_trades.append(PositionalTrade(
                 id=rec.trade_id, strategy=rec.strategy, entry_date=rec.entry_date,
@@ -201,6 +242,25 @@ class PositionalTradingEngine:
                 status=rec.status, exit_date=rec.exit_date, debit=rec.debit,
                 exit_reason=rec.exit_reason, pnl=rec.pnl
             ))
+
+        # Detect orphaned open trades under a DIFFERENT strategy name -- e.g.
+        # positional_risk.strategy was switched in config while a trade was
+        # still open under the old name. Scoping _load()/maybe_enter() by
+        # strategy_name (above) means this engine would otherwise never see
+        # that trade and would happily open a second, uncoordinated position
+        # while the old one sits unmanaged (never marked-to-market, never
+        # closed) -- silent capital risk. This can't be fixed automatically
+        # (the old strategy's engine isn't running), so surface it loudly.
+        all_open = get_open_positional_trades()
+        orphans = [r for r in all_open if r.strategy != self.strategy_name]
+        if orphans:
+            print(f"⚠️⚠️⚠️ [Positional] {len(orphans)} open trade(s) found under a "
+                  f"DIFFERENT strategy than this engine ('{self.strategy_name}'): "
+                  f"{[(r.strategy, r.trade_id, r.expiry) for r in orphans]}. "
+                  f"These will NOT be managed (no mark-to-market, no exit) unless "
+                  f"an engine for that strategy is also running. Check "
+                  f"positional_risk.strategy / positional_risk.parallel in "
+                  f"shared/config.yaml.")
 
     def maybe_enter(
         self, today: date, spot: float, vix: float, chain_premiums: dict[float, dict[str, float]],
@@ -228,6 +288,8 @@ class PositionalTradingEngine:
             return None
         if credit <= 0:
             return None
+        if not self.strategy.should_enter(spot, credit):
+            return None
 
         trade = PositionalTrade(
             id=str(uuid4()), strategy=self.strategy_name,
@@ -252,9 +314,9 @@ class PositionalTradingEngine:
 
         expiry_date = datetime.strptime(t.expiry, "%Y-%m-%d").date()
         reason = None
-        if debit <= t.credit * (1 - PROFIT_TAKE_FRAC):
+        if debit <= t.credit * (1 - self.strategy.profit_take_frac):
             reason = "PROFIT_TAKE"
-        elif debit >= t.credit * STOP_CREDIT_MULT:
+        elif debit >= t.credit * self.strategy.stop_credit_mult:
             reason = "STOP_LOSS"
         elif today >= expiry_date:
             reason = "EXPIRY"

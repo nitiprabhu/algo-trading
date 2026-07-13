@@ -30,20 +30,49 @@ print("DEBUG: Initializing runtime...")
 runtime = IndstocksMarketRuntime(config) if data_source == "indstocks" else MarketSimulator(config)
 print("DEBUG: Runtime initialized")
 
-# Positional (weekly condor) engine -- fully separate from intraday, own capital,
-# own JSON log. Only active if shared/config.yaml positional_risk.enabled: true.
-positional_engine = None
-positional_runtime_wrapper = None
+# Positional (weekly options) engine(s) -- fully separate from intraday, own
+# capital, own JSON log. Only active if shared/config.yaml positional_risk.enabled: true.
+# mode: single -> one engine (positional_engines has 1 entry).
+# mode: parallel -> one engine per shared/config.yaml positional_risk.parallel
+# entry, each with its own capital pool -- lets all 4 strategies run and
+# accrue their own track record at once, since a weekly cycle can't be
+# switched mid-week anyway. positional_engine/positional_runtime_wrapper are
+# kept as aliases to the first engine for backward compatibility.
+positional_engines: list = []
+positional_runtime_wrappers: list = []
 _positional_cfg = config.positional_risk or {}
 if _positional_cfg.get("enabled", False):
     from services.chartedge_core.positional_trading import PositionalTradingEngine
     from services.chartedge_core.positional_runtime import PositionalRuntime
-    positional_engine = PositionalTradingEngine(
-        capital=_positional_cfg.get("capital", 100000.0),
-        strategy_name=_positional_cfg.get("strategy", "condor"),
-    )
-    positional_runtime_wrapper = PositionalRuntime(positional_engine, _positional_cfg)
-    print("DEBUG: Positional trading engine enabled")
+    if _positional_cfg.get("mode", "single") == "parallel":
+        _parallel_specs = _positional_cfg.get("parallel") or []
+        for spec in _parallel_specs:
+            # A malformed entry (missing/misspelled `strategy`) must not take
+            # down the whole API process -- this block runs at import time,
+            # before FastAPI even starts, so an uncaught ValueError here kills
+            # intraday trading too, not just the positional module.
+            try:
+                eng = PositionalTradingEngine(
+                    capital=spec.get("capital", 100000.0),
+                    strategy_name=spec.get("strategy"),
+                )
+            except ValueError as e:
+                print(f"⚠️ [Positional] Skipping malformed parallel entry {spec!r}: {e}")
+                continue
+            positional_engines.append(eng)
+            positional_runtime_wrappers.append(PositionalRuntime(eng, _positional_cfg))
+        print(f"DEBUG: Positional trading engines enabled (parallel): {[e.strategy_name for e in positional_engines]}")
+    else:
+        eng = PositionalTradingEngine(
+            capital=_positional_cfg.get("capital", 100000.0),
+            strategy_name=_positional_cfg.get("strategy", "condor"),
+        )
+        positional_engines.append(eng)
+        positional_runtime_wrappers.append(PositionalRuntime(eng, _positional_cfg))
+        print("DEBUG: Positional trading engine enabled (single)")
+
+positional_engine = positional_engines[0] if positional_engines else None
+positional_runtime_wrapper = positional_runtime_wrappers[0] if positional_runtime_wrappers else None
 
 # Positional stocks (large-cap technical investment) engine -- fully separate
 # from intraday and from the weekly options positional module, own capital,
@@ -84,15 +113,17 @@ async def lifespan(app: FastAPI):
             print("DEBUG: Background config sync finished")
         asyncio.create_task(background_sync())
 
-    if positional_runtime_wrapper is not None:
-        async def positional_loop():
-            while True:
-                try:
-                    await positional_runtime_wrapper.check_once_per_day(runtime)
-                except Exception as e:
-                    print(f"⚠️ [Positional] check failed: {e}")
-                await asyncio.sleep(300)  # every 5 minutes during market hours
-        asyncio.create_task(positional_loop())
+    for _wrapper in positional_runtime_wrappers:
+        def _make_positional_loop(wrapper):
+            async def positional_loop():
+                while True:
+                    try:
+                        await wrapper.check_once_per_day(runtime)
+                    except Exception as e:
+                        print(f"⚠️ [Positional/{wrapper.engine.strategy_name}] check failed: {e}")
+                    await asyncio.sleep(300)  # every 5 minutes during market hours
+            return positional_loop
+        asyncio.create_task(_make_positional_loop(_wrapper)())
 
     if positional_stocks_runtime_wrapper is not None:
         async def positional_stocks_loop():
@@ -148,13 +179,44 @@ def get_snapshot() -> dict:
 
 @app.get("/api/positional/status")
 def get_positional_status() -> dict:
+    """Single-engine shape kept for backward compat (mirrors positional_engines[0]).
+    Use /api/positional/status/all for every engine when mode: parallel -- in that
+    mode this endpoint only ever reports the first configured strategy, so callers
+    get an explicit "note" telling them the other engines exist and are not shown here."""
     if positional_engine is None:
         return {"enabled": False, "open_trade": None, "closed_trades": [], "metrics": {}}
-    return {
+    result = {
         "enabled": True,
         "open_trade": positional_engine.open_trade.to_dict() if positional_engine.open_trade else None,
         "closed_trades": [t.to_dict() for t in positional_engine.closed_trades],
         "metrics": positional_engine.metrics(),
+    }
+    if len(positional_engines) > 1:
+        result["note"] = (
+            f"mode: parallel -- {len(positional_engines)} engines active "
+            f"({[e.strategy_name for e in positional_engines]}), this endpoint "
+            f"only shows '{positional_engine.strategy_name}'. See /api/positional/status/all."
+        )
+    return result
+
+
+@app.get("/api/positional/status/all")
+def get_positional_status_all() -> dict:
+    """One entry per running positional engine, keyed by strategy name.
+    Populated for both mode: single (1 entry) and mode: parallel (up to 4)."""
+    if not positional_engines:
+        return {"enabled": False, "strategies": {}}
+    return {
+        "enabled": True,
+        "strategies": {
+            eng.strategy_name: {
+                "capital": eng.capital,
+                "open_trade": eng.open_trade.to_dict() if eng.open_trade else None,
+                "closed_trades": [t.to_dict() for t in eng.closed_trades],
+                "metrics": eng.metrics(),
+            }
+            for eng in positional_engines
+        },
     }
 
 @app.get("/api/positional_stocks/status")

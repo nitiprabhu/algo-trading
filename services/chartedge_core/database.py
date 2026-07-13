@@ -39,9 +39,15 @@ else:
     print(f"DEBUG: database.py: DATABASE_URL found (length={len(DATABASE_URL)})")
 
 print("DEBUG: database.py: Creating engine")
+# connect_timeout is a Postgres/psycopg-only connect arg -- passing it to the
+# SQLite driver raises TypeError before any query runs. Every caller in this
+# file wraps its query in try/except and just prints a warning, so this was
+# silently no-op-ing all persistence (positional trades, paper trades, config
+# overrides) whenever DATABASE_URL was unset (the local-dev default).
+_connect_args = {"connect_timeout": 30} if DATABASE_URL.startswith("postgres") else {}
 engine = create_engine(
-    DATABASE_URL, 
-    connect_args={"connect_timeout": 30}
+    DATABASE_URL,
+    connect_args=_connect_args,
 )
 print("DEBUG: database.py: Engine created")
 
@@ -342,13 +348,18 @@ def persist_positional_exit(trade_id: str, exit_date: str, debit: float,
         return None
 
 
-def get_open_positional_trades() -> List[PositionalTradeRecord]:
-    """Fetch all open positional trades."""
+def get_open_positional_trades(strategy: Optional[str] = None) -> List[PositionalTradeRecord]:
+    """Fetch open positional trades. Pass strategy to scope to one strategy's
+    engine -- required when multiple PositionalTradingEngine instances run in
+    parallel (positional_risk.mode: parallel), otherwise each engine's _load()
+    could pick up another strategy's open trade."""
     if not DATABASE_URL:
         return []
     try:
         with Session(engine) as session:
             statement = select(PositionalTradeRecord).where(PositionalTradeRecord.status == "OPEN")
+            if strategy is not None:
+                statement = statement.where(PositionalTradeRecord.strategy == strategy)
             results = session.exec(statement)
             return list(results.all())
     except Exception as e:
@@ -356,18 +367,17 @@ def get_open_positional_trades() -> List[PositionalTradeRecord]:
         return []
 
 
-def get_closed_positional_trades(limit: int = 50) -> List[PositionalTradeRecord]:
-    """Fetch recent closed positional trades."""
+def get_closed_positional_trades(limit: int = 50, strategy: Optional[str] = None) -> List[PositionalTradeRecord]:
+    """Fetch recent closed positional trades, optionally scoped to one strategy
+    (see get_open_positional_trades docstring)."""
     if not DATABASE_URL:
         return []
     try:
         with Session(engine) as session:
-            statement = (
-                select(PositionalTradeRecord)
-                .where(PositionalTradeRecord.status == "CLOSED")
-                .order_by(PositionalTradeRecord.exit_date.desc())
-                .limit(limit)
-            )
+            statement = select(PositionalTradeRecord).where(PositionalTradeRecord.status == "CLOSED")
+            if strategy is not None:
+                statement = statement.where(PositionalTradeRecord.strategy == strategy)
+            statement = statement.order_by(PositionalTradeRecord.exit_date.desc()).limit(limit)
             results = session.exec(statement)
             return list(results.all())
     except Exception as e:

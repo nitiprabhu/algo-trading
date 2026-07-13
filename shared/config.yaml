@@ -156,8 +156,12 @@ positional_risk:
   # capital pool, isolated from intraday. See scratch/real_options_strategy_comparison.py
   # for the validation methodology (2yr real bhavcopy data).
   enabled: true           # LIVE: watch for Telegram entry/exit alerts during market hours
-  strategy: condor        # condor (default, bounded risk) | straddle (undefined risk,
-                           # highest raw profit) | credit_spread (lowest variance)
+  mode: single             # single (1 engine, `strategy` below)
+  strategy: condor        # used when mode: single. condor (default, bounded risk) |
+                           # straddle (undefined risk, highest raw profit) | credit_spread
+                           # (lowest variance) | iv_gated_straddle (undefined risk,
+                           # entries only on rich-IV weeks -- best 2yr Sharpe of all 4,
+                           # see positional_trading.py)
   capital: 100000.0       # separate allocation, not shared with intraday total_capital
   lot_size: 75            # NIFTY lot size (SEBI revised 25->75; update if changed again)
   profit_take_frac: 0.55

@@ -1,0 +1,26 @@
+name: Trigger Positional Stocks Analysis
+
+on:
+  schedule:
+    # 15:40 IST = 10:10 UTC, Mon-Fri. Adjust minute if check_after_time in
+    # shared/config.yaml changes (default cutoff there is 15:35 IST).
+    - cron: "10 10 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call positional stocks trigger endpoint
+        run: |
+          response=$(curl -sS -w "\n%{http_code}" -X POST \
+            "${{ vars.CHARTEDGE_API_HOST }}/api/positional_stocks/trigger" \
+            -H "X-Trigger-Key: ${{ secrets.TRIGGER_API_KEY }}")
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          echo "HTTP $http_code"
+          echo "$body"
+          if [ "$http_code" -ge 400 ]; then
+            echo "::error::Trigger call failed with HTTP $http_code"
+            exit 1
+          fi

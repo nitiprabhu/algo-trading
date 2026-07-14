@@ -61,17 +61,26 @@ class PositionalStocksRuntime:
         self.config = config
         self._last_check_date: date | None = None
 
-    async def check_once_per_day(self) -> None:
+    async def check_once_per_day(self, force: bool = False) -> dict:
+        """Run one analysis pass over all configured symbols.
+
+        force=True bypasses the once-per-day guard and the post-close cutoff
+        time, for manual/external triggers (e.g. a GitHub Actions workflow).
+        Returns a summary dict of what happened this run.
+        """
         now = datetime.now(IST)
         today = now.date()
 
-        if self._last_check_date == today:
-            return
-        cutoff = self.config.get("check_after_time", "15:35")
-        cutoff_h, cutoff_m = (int(x) for x in cutoff.split(":"))
-        if now.time() < dtime(cutoff_h, cutoff_m):
-            return
+        if not force:
+            if self._last_check_date == today:
+                return {"ran": False, "reason": "already_checked_today"}
+            cutoff = self.config.get("check_after_time", "15:35")
+            cutoff_h, cutoff_m = (int(x) for x in cutoff.split(":"))
+            if now.time() < dtime(cutoff_h, cutoff_m):
+                return {"ran": False, "reason": "before_cutoff_time"}
 
+        entries: list[str] = []
+        exits: list[str] = []
         symbols: list[str] = self.config.get("symbols", [])
         buy_threshold = self.config.get("buy_threshold", 0.35)
         sell_threshold = self.config.get("sell_threshold", -0.35)
@@ -102,6 +111,7 @@ class PositionalStocksRuntime:
                 )
                 if closed:
                     await self._notify_exit(closed)
+                    exits.append(symbol)
             else:
                 trend_confirmed = True
                 if require_trend_gate:
@@ -112,8 +122,16 @@ class PositionalStocksRuntime:
                 )
                 if opened:
                     await self._notify_entry(opened, score)
+                    entries.append(symbol)
 
         self._last_check_date = today
+        return {
+            "ran": True,
+            "checked_symbols": symbols,
+            "entries": entries,
+            "exits": exits,
+            "forced": force,
+        }
 
     async def _notify_entry(self, position, score: float) -> None:
         from services.chartedge_core.telegram import notifier

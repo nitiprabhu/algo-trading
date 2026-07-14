@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load .env before other imports that might use env vars
 load_dotenv()
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from typing import Optional
@@ -229,6 +229,27 @@ def get_positional_stocks_status() -> dict:
         "closed_positions": [p.to_dict() for p in positional_stocks_engine.closed_positions],
         "metrics": positional_stocks_engine.metrics(),
     }
+
+
+@app.post("/api/positional_stocks/trigger")
+async def trigger_positional_stocks(x_trigger_key: Optional[str] = Header(default=None)) -> dict:
+    """Manually force one positional-stocks analysis pass, bypassing the
+    once-per-day guard and the post-close cutoff time. Meant for external
+    schedulers (e.g. a GitHub Actions cron) to hit instead of relying on the
+    in-process daily loop. Sends the same Telegram alerts as the automatic
+    run on any entry/exit. Requires TRIGGER_API_KEY env var to match the
+    X-Trigger-Key header -- this is real-money-adjacent (positional_stocks_risk
+    live_orders may be dry_run/true), so it isn't left open like the other
+    unauthenticated status endpoints."""
+    expected_key = os.getenv("TRIGGER_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="TRIGGER_API_KEY not configured on server")
+    if x_trigger_key != expected_key:
+        raise HTTPException(status_code=403, detail="invalid or missing X-Trigger-Key header")
+    if positional_stocks_runtime_wrapper is None:
+        raise HTTPException(status_code=503, detail="positional_stocks_risk not enabled in config")
+    result = await positional_stocks_runtime_wrapper.check_once_per_day(force=True)
+    return result
 
 
 @app.get("/api/debug/option")

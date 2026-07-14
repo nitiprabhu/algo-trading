@@ -354,3 +354,26 @@ iron_condor:
   profit_take_pct: 0.55       # close when condor buyback ≤ (1-PT)*credit
   stop_mult: 2.2              # close when condor worth > stop_mult * credit
   lookback_days: 5            # days of price history for trend gate
+
+
+live_trading:
+  # Real-money order execution for the positional-stocks pools via Upstox
+  # REST v2 (services/chartedge_core/upstox_broker.py). BOTH gates below
+  # default to the safe position -- a real order needs enabled: true AND
+  # dry_run: false AND a valid same-day Upstox token. Leave as-is to run
+  # the whole live path in simulation (logs intended orders, sends nothing).
+  enabled: false            # MASTER KILL SWITCH. false = no live path at all.
+  dry_run: true             # true = simulate every order (no wire calls).
+  broker: upstox
+  order_type: MARKET        # entries/exits at market (near-close). LIMIT possible later.
+  gtt_stop_pct: 4.0         # server-side GTT stop-loss %, matches engine stop_loss_pct.
+                            # Lives on Upstox independent of the daily token -- protects
+                            # open positions even if the daily approval is forgotten.
+  # NO gtt target leg by design: a server-side target would force an exit while
+  # re-entry needs the (possibly absent) token -> manufactured missed opportunity.
+  # Targets/trailing/sell-signal stay dynamic in the engine.
+  #
+  # symbol -> Upstox instrument_key. REQUIRED per symbol before it can trade
+  # live; a symbol missing here is skipped (fail-closed), never guessed.
+  # Fill via scripts/resolve_upstox_keys.py against the Upstox instrument master.
+  instrument_keys: {}

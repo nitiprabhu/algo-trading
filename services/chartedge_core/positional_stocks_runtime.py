@@ -123,6 +123,7 @@ class PositionalStocksRuntime:
                 )
                 if closed:
                     await self._notify_exit(closed)
+                    await self._live_exit(closed)
                     exits.append(symbol)
             else:
                 trend_confirmed = True
@@ -135,6 +136,7 @@ class PositionalStocksRuntime:
                 )
                 if opened:
                     await self._notify_entry(opened, score)
+                    await self._live_entry(opened, price)
                     entries.append(symbol)
                 elif qualifies and allow_rotation:
                     # fully qualifies but blocked purely by pool capacity/capital --
@@ -154,6 +156,10 @@ class PositionalStocksRuntime:
                 if result:
                     closed, opened = result
                     await self._notify_rotation(closed, opened, score)
+                    # order matters: close the old live position (frees the
+                    # holding + cancels its GTT context) before opening the new one.
+                    await self._live_exit(closed)
+                    await self._live_entry(opened, prices_today[symbol])
                     exits.append(closed.symbol)
                     entries.append(symbol)
                     rotations.append(f"{closed.symbol}->{symbol}")
@@ -167,6 +173,53 @@ class PositionalStocksRuntime:
             "rotations": rotations,
             "forced": force,
         }
+
+    def _live_tag(self) -> str:
+        """Upstox order tag grouping this pool's live orders (<=40 chars)."""
+        return f"POS_{self.engine.pool.upper()}"[:40]
+
+    async def _live_entry(self, position, ref_price: float) -> None:
+        """Fire a live Upstox BUY + protective GTT stop for a fresh entry.
+        No-op unless live_trading is armed; on dry_run it just logs. Never
+        raises -- the paper record is already committed, so a broker failure
+        must not roll that back; it only alerts."""
+        from services.chartedge_core.upstox_broker import live_broker
+        from services.chartedge_core.telegram import notifier
+        broker = live_broker()
+        if not broker.enabled:
+            return  # live path entirely off -> pure paper, stay silent
+        res = broker.place_entry(position.symbol, position.quantity, ref_price, self._live_tag())
+        mode = "SIM" if res.simulated else "LIVE"
+        if res.ok:
+            await notifier.send_message(
+                f"[{mode} ORDER] BUY {position.symbol} x{position.quantity} "
+                f"tag={self._live_tag()} | {res.reason}"
+            )
+        else:
+            await notifier.send_message(
+                f"⚠️ [{mode} ORDER FAILED] BUY {position.symbol} -- {res.reason}. "
+                f"Paper position stands; no live fill."
+            )
+
+    async def _live_exit(self, position) -> None:
+        """Fire a live Upstox SELL to close a live position on an engine exit.
+        If no valid token, the sell is skipped and the position's server-side
+        GTT stop remains the protective floor -- surfaced via alert."""
+        from services.chartedge_core.upstox_broker import live_broker
+        from services.chartedge_core.telegram import notifier
+        broker = live_broker()
+        if not broker.enabled:
+            return
+        res = broker.place_exit(position.symbol, position.quantity, self._live_tag())
+        mode = "SIM" if res.simulated else "LIVE"
+        if res.ok:
+            await notifier.send_message(
+                f"[{mode} ORDER] SELL {position.symbol} x{position.quantity} | {res.reason}"
+            )
+        else:
+            await notifier.send_message(
+                f"⚠️ [{mode} ORDER FAILED] SELL {position.symbol} -- {res.reason}"
+            )
 
     async def _notify_entry(self, position, score: float) -> None:
         from services.chartedge_core.telegram import notifier

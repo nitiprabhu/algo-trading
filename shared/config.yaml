@@ -362,8 +362,10 @@ live_trading:
   # default to the safe position -- a real order needs enabled: true AND
   # dry_run: false AND a valid same-day Upstox token. Leave as-is to run
   # the whole live path in simulation (logs intended orders, sends nothing).
-  enabled: false            # MASTER KILL SWITCH. false = no live path at all.
-  dry_run: true             # true = simulate every order (no wire calls).
+  enabled: true             # MASTER KILL SWITCH. false = no live path at all.
+  dry_run: false            # false = real orders. Funds-check in upstox_broker.py
+                            # fails closed if the account has insufficient balance --
+                            # safe to arm with ₹0/low funds to test the pipeline.
   broker: upstox
   order_type: MARKET        # entries/exits at market (near-close). LIMIT possible later.
   request_token_time: "14:30"  # IST -- auto-fire the WhatsApp token-request push
@@ -377,5 +379,31 @@ live_trading:
   #
   # symbol -> Upstox instrument_key. REQUIRED per symbol before it can trade
   # live; a symbol missing here is skipped (fail-closed), never guessed.
-  # Fill via scripts/resolve_upstox_keys.py against the Upstox instrument master.
-  instrument_keys: {}
+  # Resolved via scripts/resolve_upstox_keys.py against the Upstox instrument
+  # master on 2026-07-15. BGRENERGY/STLTECH are BE (Trade-to-Trade/surveillance,
+  # tighter circuits) and INDIGRID is an InvIT (not a stock) -- flagged, not
+  # excluded, since they're still delivery-tradeable.
+  instrument_keys:
+    SBIN: "NSE_EQ|INE062A01020"
+    ADANIENT: "NSE_EQ|INE423A01024"
+    VEDL: "NSE_EQ|INE205A01025"
+    ONGC: "NSE_EQ|INE213A01029"
+    HINDALCO: "NSE_EQ|INE038A01020"
+    LAURUSLABS: "NSE_EQ|INE947Q01028"
+    "M&MFIN": "NSE_EQ|INE774D01024"
+    ASHOKLEY: "NSE_EQ|INE208A01029"
+    IDEA: "NSE_EQ|INE669E01016"
+    ADANIENSOL: "NSE_EQ|INE931S01010"
+    MUTHOOTFIN: "NSE_EQ|INE414G01012"
+    FEDERALBNK: "NSE_EQ|INE171A01029"
+    NYKAA: "NSE_EQ|INE388Y01029"
+    BGRENERGY: "NSE_EQ|INE661I01014"  # BE -- surveillance segment, review
+    STLTECH: "NSE_EQ|INE089C01029"    # BE -- surveillance segment, review
+    AXISCADES: "NSE_EQ|INE555B01013"
+    HFCL: "NSE_EQ|INE548A01028"
+    NATIONALUM: "NSE_EQ|INE139A01034"
+    SOLARINDS: "NSE_EQ|INE343H01029"
+    HINDCOPPER: "NSE_EQ|INE531E01026"
+    DIACABS: "NSE_EQ|INE989C01038"
+    INDIGRID: "NSE_EQ|INE219X23014"   # IV -- InvIT, not equity, review
+    APCOTEXIND: "NSE_EQ|INE116A01032"

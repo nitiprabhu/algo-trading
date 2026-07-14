@@ -423,18 +423,21 @@ async def trigger_positional_stocks_smallcap(x_trigger_key: Optional[str] = Head
     return result
 
 
-@app.post("/api/upstox/token_webhook")
-async def upstox_token_webhook(request: Request) -> dict:
+@app.post("/api/upstox/token_webhook/{secret}")
+async def upstox_token_webhook(secret: str, request: Request) -> dict:
     """Receives the daily Upstox access token after the user approves the
     WhatsApp/in-app push (Upstox posts the token here). Stores it as
     {"date": <today IST>, "access_token": ...} in UPSTOX_TOKEN_FILE, where
     UpstoxBroker.get_valid_token() reads it. Accepts the token under any of
     the common payload keys Upstox/user-proxy may use.
 
-    Secured by a shared secret: header X-Upstox-Webhook-Secret must match
-    env UPSTOX_WEBHOOK_SECRET (set it, and configure the same on the Upstox
-    app webhook). Without the env set, the endpoint refuses to store -- so a
-    stray/forged POST can't inject a token."""
+    Secured by a shared secret carried in the URL PATH (Upstox's notifier
+    field rejects query strings, and Upstox controls its own POST headers --
+    so the secret lives in the path). Register the notifier URL as:
+        https://<host>/api/upstox/token_webhook/<UPSTOX_WEBHOOK_SECRET>
+    The trailing path segment must equal env UPSTOX_WEBHOOK_SECRET; without
+    the env set, the endpoint refuses to store -- so a stray/forged POST
+    can't inject a token."""
     import json as _json
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo as _ZI
@@ -443,7 +446,7 @@ async def upstox_token_webhook(request: Request) -> dict:
     expected = os.getenv("UPSTOX_WEBHOOK_SECRET")
     if not expected:
         raise HTTPException(status_code=503, detail="UPSTOX_WEBHOOK_SECRET not configured on server")
-    if request.headers.get("x-upstox-webhook-secret") != expected:
+    if secret != expected:
         raise HTTPException(status_code=403, detail="invalid webhook secret")
 
     try:

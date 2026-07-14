@@ -45,6 +45,13 @@ def fetch_daily_candles(symbol: str, period: str = "1y") -> list[Candle]:
         return []
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
+    # yfinance can return NaN rows (today's still-forming bar, holidays, splits).
+    # A NaN close flows into indicators and blows up statistics.pstdev
+    # ("'float' object has no attribute 'numerator'"), 500-ing the whole run.
+    # Drop any row missing an OHLCV value so only clean bars reach the engine.
+    df = df.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+    if df.empty:
+        return []
     candles = []
     for ts, row in df.iterrows():
         candles.append(Candle(

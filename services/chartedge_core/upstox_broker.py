@@ -179,6 +179,25 @@ class UpstoxBroker:
             print(f"[UpstoxBroker] token read failed: {e}")
             return None
 
+    def get_available_funds(self, token: str) -> Optional[float]:
+        """Live equity funds available for delivery buys, from Upstox
+        GET /user/get-funds-and-margin?segment=SEC. Returns None on any
+        failure (caller must then fail closed -- never guess a balance)."""
+        try:
+            resp = requests.get(
+                f"{self._api_base}/user/get-funds-and-margin",
+                headers=self._headers(token), params={"segment": "SEC"}, timeout=15,
+            )
+            if resp.status_code != 200:
+                print(f"[UpstoxBroker] funds check HTTP {resp.status_code}: {resp.text[:150]}")
+                return None
+            eq = (resp.json().get("data") or {}).get("equity") or {}
+            avail = eq.get("available_margin")
+            return float(avail) if avail is not None else None
+        except Exception as e:
+            print(f"[UpstoxBroker] funds check failed: {e}")
+            return None
+
     def _headers(self, token: str) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {token}",
@@ -221,6 +240,24 @@ class UpstoxBroker:
         if not token:
             return OrderResult(ok=False, simulated=False,
                                reason="no valid token for today")
+
+        # --- funds-aware sizing: never assume the configured pool capital is
+        # actually in the account. Query live equity funds and shrink the
+        # order to what the balance can afford (with a small buffer for
+        # brokerage/charges). Funds check failing -> fail closed, no order.
+        funds = self.get_available_funds(token)
+        if funds is None:
+            return OrderResult(ok=False, simulated=False,
+                               reason="funds check failed -- not placing blind")
+        affordable = int((funds * 0.99) // ref_price) if ref_price > 0 else 0
+        if affordable <= 0:
+            return OrderResult(ok=False, simulated=False,
+                               reason=f"insufficient funds: ₹{funds:,.0f} available, "
+                                      f"1 share needs ~₹{ref_price:,.0f}")
+        if affordable < quantity:
+            print(f"[UpstoxBroker] {symbol}: sizing down {quantity} -> {affordable} "
+                  f"(₹{funds:,.0f} available)")
+            quantity = affordable
 
         # --- real BUY ---
         try:

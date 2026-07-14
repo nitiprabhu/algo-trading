@@ -204,7 +204,7 @@ positional_stocks_risk:
   trail_keep_frac: 0.5    # trailing stop locks in 50% of peak gain once armed
   yfinance_period: "2y"   # daily bars pulled per check; 2y gives Golden Cross/Cup&Handle enough history
   symbols: [SBIN, ADANIENT, VEDL, ONGC, HINDALCO]  # top 5 by 12mo backtest CAGR (22.69%)
-  check_after_time: "15:35"  # IST cutoff -- runs once per day after this time, not every 5 min
+  check_after_time: "15:00"  # IST cutoff -- runs once per day after this time, not every 5 min
 
 positional_stocks_midcap_risk:
   # Midcap + Nifty Next50 sibling of positional_stocks_risk above -- same
@@ -246,7 +246,7 @@ positional_stocks_midcap_risk:
   trail_keep_frac: 0.5
   yfinance_period: "2y"
   symbols: [LAURUSLABS, "M&MFIN", ASHOKLEY, IDEA, ADANIENSOL, MUTHOOTFIN, FEDERALBNK, NYKAA]
-  check_after_time: "15:35"
+  check_after_time: "15:00"
 
 positional_stocks_smallcap_risk:
   # Smallcap + microcap sibling of positional_stocks_risk / positional_stocks_midcap_risk
@@ -287,7 +287,7 @@ positional_stocks_smallcap_risk:
   trail_keep_frac: 0.5
   yfinance_period: "2y"
   symbols: [BGRENERGY, STLTECH, AXISCADES, HFCL, NATIONALUM, SOLARINDS, HINDCOPPER, DIACABS, INDIGRID, APCOTEXIND]
-  check_after_time: "15:35"
+  check_after_time: "15:00"
 
 futures_risk:
   NIFTY_FUT:
@@ -366,7 +366,7 @@ live_trading:
   dry_run: true             # true = simulate every order (no wire calls).
   broker: upstox
   order_type: MARKET        # entries/exits at market (near-close). LIMIT possible later.
-  request_token_time: "15:00"  # IST -- auto-fire the WhatsApp token-request push
+  request_token_time: "14:30"  # IST -- auto-fire the WhatsApp token-request push
                                 #  before the 15:35 positional run (production only)
   gtt_stop_pct: 4.0         # server-side GTT stop-loss %, matches engine stop_loss_pct.
                             # Lives on Upstox independent of the daily token -- protects

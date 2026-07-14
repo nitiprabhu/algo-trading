@@ -167,7 +167,10 @@ def vwap(candles: Sequence[Candle]) -> float:
 
 
 def bollinger(values: Sequence[float], period: int = 20) -> dict[str, float]:
-    window = list(values[-period:])
+    # Drop non-finite values: statistics.pstdev raises an opaque
+    # "'float' object has no attribute 'numerator'" on NaN/inf input.
+    import math
+    window = [v for v in list(values[-period:]) if math.isfinite(v)]
     mid = mean(window) if window else 0.0
     dev = pstdev(window) if len(window) > 1 else 0.0
     upper = mid + (2 * dev)

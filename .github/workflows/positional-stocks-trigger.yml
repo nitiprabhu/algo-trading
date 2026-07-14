@@ -10,14 +10,14 @@ name: Trigger Positional Stocks Analysis
 #      (largecap + midcap + smallcap). Places live orders only if armed.
 on:
   schedule:
-    - cron: "30 9 * * 1-5"   # 15:00 IST -> Upstox token-request (WhatsApp push)
-    - cron: "0 10 * * 1-5"   # 15:30 IST -> positional analysis (all pools)
+    - cron: "0 9 * * 1-5"    # 14:30 IST -> Upstox token-request (WhatsApp push)
+    - cron: "30 9 * * 1-5"   # 15:00 IST -> positional analysis + orders (fills before 15:30 close)
   workflow_dispatch: {}
 
 jobs:
   upstox-token:
     # only the 15:00 schedule (and manual dispatch) fires the token request
-    if: github.event.schedule == '30 9 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '0 9 * * 1-5' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: default
     steps:
@@ -34,7 +34,7 @@ jobs:
           fi
 
   analysis:
-    if: github.event.schedule == '0 10 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '30 9 * * 1-5' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: default
     strategy:

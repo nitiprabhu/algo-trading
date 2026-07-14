@@ -431,10 +431,15 @@ async def upstox_token_webhook(request: Request) -> dict:
     UpstoxBroker.get_valid_token() reads it. Accepts the token under any of
     the common payload keys Upstox/user-proxy may use.
 
-    Secured by a shared secret: header X-Upstox-Webhook-Secret must match
-    env UPSTOX_WEBHOOK_SECRET (set it, and configure the same on the Upstox
-    app webhook). Without the env set, the endpoint refuses to store -- so a
-    stray/forged POST can't inject a token."""
+    Secured by a shared secret that must match env UPSTOX_WEBHOOK_SECRET.
+    Upstox controls the headers on its notifier POST, so the secret is read
+    from the URL you register as the notifier (Upstox posts to exactly that
+    URL): register it as
+        https://<host>/api/upstox/token_webhook?s=<UPSTOX_WEBHOOK_SECRET>
+    The `?s=` query param is the primary check; the X-Upstox-Webhook-Secret
+    header is still accepted as a fallback for manual/self testing. Without
+    the env set, the endpoint refuses to store -- so a stray/forged POST
+    can't inject a token."""
     import json as _json
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo as _ZI
@@ -443,7 +448,8 @@ async def upstox_token_webhook(request: Request) -> dict:
     expected = os.getenv("UPSTOX_WEBHOOK_SECRET")
     if not expected:
         raise HTTPException(status_code=503, detail="UPSTOX_WEBHOOK_SECRET not configured on server")
-    if request.headers.get("x-upstox-webhook-secret") != expected:
+    provided = request.query_params.get("s") or request.headers.get("x-upstox-webhook-secret")
+    if provided != expected:
         raise HTTPException(status_code=403, detail="invalid webhook secret")
 
     try:

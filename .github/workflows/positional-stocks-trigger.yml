@@ -1,26 +1,55 @@
 name: Trigger Positional Stocks Analysis
 
+# Two scheduled jobs (GitHub Actions cron is the robust trigger -- it also
+# wakes a sleeping Render instance, which the in-process daily loops can't
+# rely on):
+#   1. token-request at 15:00 IST -> fires the Upstox WhatsApp/app approval
+#      push so a valid token is present before the 15:30 run. Approve on your
+#      phone. Skips harmlessly if live trading is off / not configured.
+#   2. analysis at 15:30 IST -> runs all three positional-stock pools
+#      (largecap + midcap + smallcap). Places live orders only if armed.
 on:
   schedule:
-    # 15:30 IST = 10:00 UTC, Mon-Fri.
-    - cron: "0 10 * * 1-5"
+    - cron: "30 9 * * 1-5"   # 15:00 IST -> Upstox token-request (WhatsApp push)
+    - cron: "0 10 * * 1-5"   # 15:30 IST -> positional analysis (all pools)
   workflow_dispatch: {}
 
 jobs:
-  trigger:
+  upstox-token:
+    # only the 15:00 schedule (and manual dispatch) fires the token request
+    if: github.event.schedule == '30 9 * * 1-5' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: default
     steps:
-      - name: Call positional stocks trigger endpoint
+      - name: Fire Upstox token-request (WhatsApp/app approval push)
         run: |
           response=$(curl -sS -w "\n%{http_code}" -X POST \
-            "${{ vars.CHARTEDGE_API_HOST }}/api/positional_stocks/trigger" \
+            "${{ vars.CHARTEDGE_API_HOST }}/api/upstox/request_token" \
+            -H "X-Trigger-Key: ${{ secrets.TRIGGER_API_KEY }}")
+          http_code=$(echo "$response" | tail -n1)
+          echo "HTTP $http_code"; echo "$response" | sed '$d'
+          # 503 (live trading not configured) is not a failure -- token flow is optional
+          if [ "$http_code" -ge 400 ] && [ "$http_code" -ne 503 ]; then
+            echo "::error::token-request failed with HTTP $http_code"; exit 1
+          fi
+
+  analysis:
+    if: github.event.schedule == '0 10 * * 1-5' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: default
+    strategy:
+      matrix:
+        pool: [positional_stocks, positional_stocks_midcap, positional_stocks_smallcap]
+    steps:
+      - name: Trigger ${{ matrix.pool }}
+        run: |
+          response=$(curl -sS -w "\n%{http_code}" -X POST \
+            "${{ vars.CHARTEDGE_API_HOST }}/api/${{ matrix.pool }}/trigger" \
             -H "X-Trigger-Key: ${{ secrets.TRIGGER_API_KEY }}")
           http_code=$(echo "$response" | tail -n1)
           body=$(echo "$response" | sed '$d')
-          echo "HTTP $http_code"
-          echo "$body"
-          if [ "$http_code" -ge 400 ]; then
-            echo "::error::Trigger call failed with HTTP $http_code"
-            exit 1
+          echo "HTTP $http_code"; echo "$body"
+          # 503 = that pool not enabled in config -> skip, not a failure
+          if [ "$http_code" -ge 400 ] && [ "$http_code" -ne 503 ]; then
+            echo "::error::${{ matrix.pool }} trigger failed with HTTP $http_code"; exit 1
           fi

@@ -2,9 +2,8 @@ name: Trigger Positional Stocks Analysis
 
 on:
   schedule:
-    # 15:40 IST = 10:10 UTC, Mon-Fri. Adjust minute if check_after_time in
-    # shared/config.yaml changes (default cutoff there is 15:35 IST).
-    - cron: "10 10 * * 1-5"
+    # 15:30 IST = 10:00 UTC, Mon-Fri.
+    - cron: "0 10 * * 1-5"
   workflow_dispatch: {}
 
 jobs:

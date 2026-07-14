@@ -93,6 +93,54 @@ if _positional_stocks_cfg.get("enabled", False):
     positional_stocks_runtime_wrapper = PositionalStocksRuntime(positional_stocks_engine, _positional_stocks_cfg)
     print("DEBUG: Positional stocks engine enabled")
 
+# Positional stocks (midcap + Nifty Next50 technical investment) engine --
+# sibling of the largecap module above, own capital pool ("midcap" tag on
+# the shared StockPositionRecord table). Only active if shared/config.yaml
+# positional_stocks_midcap_risk.enabled: true.
+positional_stocks_midcap_engine = None
+positional_stocks_midcap_runtime_wrapper = None
+_positional_stocks_midcap_cfg = config.positional_stocks_midcap_risk or {}
+if _positional_stocks_midcap_cfg.get("enabled", False):
+    from services.chartedge_core.positional_stocks import PositionalStocksEngine
+    from services.chartedge_core.positional_stocks_runtime import PositionalStocksRuntime
+    positional_stocks_midcap_engine = PositionalStocksEngine(
+        capital=_positional_stocks_midcap_cfg.get("capital", 100000.0),
+        max_positions=_positional_stocks_midcap_cfg.get("max_positions", 8),
+        stop_loss_pct=_positional_stocks_midcap_cfg.get("stop_loss_pct", 4.0),
+        target_pct=_positional_stocks_midcap_cfg.get("target_pct", 12.0),
+        pool="midcap",
+        confidence_sizing=_positional_stocks_midcap_cfg.get("confidence_sizing", False),
+    )
+    positional_stocks_midcap_runtime_wrapper = PositionalStocksRuntime(
+        positional_stocks_midcap_engine, _positional_stocks_midcap_cfg
+    )
+    print("DEBUG: Positional stocks midcap engine enabled")
+
+# Positional stocks (smallcap + microcap technical investment) engine --
+# sibling of the largecap/midcap modules above, own capital pool ("smallcap"
+# tag). Only active if shared/config.yaml positional_stocks_smallcap_risk.enabled: true.
+# Capital budget note: largecap (1L) + midcap (1L) + smallcap (1L) = 3L total,
+# per explicit user-set portfolio-wide cap -- do not raise any pool's capital
+# without cutting another to stay under 3L combined.
+positional_stocks_smallcap_engine = None
+positional_stocks_smallcap_runtime_wrapper = None
+_positional_stocks_smallcap_cfg = config.positional_stocks_smallcap_risk or {}
+if _positional_stocks_smallcap_cfg.get("enabled", False):
+    from services.chartedge_core.positional_stocks import PositionalStocksEngine
+    from services.chartedge_core.positional_stocks_runtime import PositionalStocksRuntime
+    positional_stocks_smallcap_engine = PositionalStocksEngine(
+        capital=_positional_stocks_smallcap_cfg.get("capital", 100000.0),
+        max_positions=_positional_stocks_smallcap_cfg.get("max_positions", 10),
+        stop_loss_pct=_positional_stocks_smallcap_cfg.get("stop_loss_pct", 4.0),
+        target_pct=_positional_stocks_smallcap_cfg.get("target_pct", 12.0),
+        pool="smallcap",
+        confidence_sizing=_positional_stocks_smallcap_cfg.get("confidence_sizing", False),
+    )
+    positional_stocks_smallcap_runtime_wrapper = PositionalStocksRuntime(
+        positional_stocks_smallcap_engine, _positional_stocks_smallcap_cfg
+    )
+    print("DEBUG: Positional stocks smallcap engine enabled")
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
@@ -134,6 +182,26 @@ async def lifespan(app: FastAPI):
                     print(f"⚠️ [Positional Stocks] check failed: {e}")
                 await asyncio.sleep(900)  # every 15 min; internal once-per-day guard makes cadence non-critical
         asyncio.create_task(positional_stocks_loop())
+
+    if positional_stocks_midcap_runtime_wrapper is not None:
+        async def positional_stocks_midcap_loop():
+            while True:
+                try:
+                    await positional_stocks_midcap_runtime_wrapper.check_once_per_day()
+                except Exception as e:
+                    print(f"⚠️ [Positional Stocks Midcap] check failed: {e}")
+                await asyncio.sleep(900)
+        asyncio.create_task(positional_stocks_midcap_loop())
+
+    if positional_stocks_smallcap_runtime_wrapper is not None:
+        async def positional_stocks_smallcap_loop():
+            while True:
+                try:
+                    await positional_stocks_smallcap_runtime_wrapper.check_once_per_day()
+                except Exception as e:
+                    print(f"⚠️ [Positional Stocks Smallcap] check failed: {e}")
+                await asyncio.sleep(900)
+        asyncio.create_task(positional_stocks_smallcap_loop())
 
     # Cleanup expired records daily (TTL: 30 days for positional trades, 180 days for stock positions)
     async def cleanup_loop():
@@ -249,6 +317,62 @@ async def trigger_positional_stocks(x_trigger_key: Optional[str] = Header(defaul
     if positional_stocks_runtime_wrapper is None:
         raise HTTPException(status_code=503, detail="positional_stocks_risk not enabled in config")
     result = await positional_stocks_runtime_wrapper.check_once_per_day(force=True)
+    return result
+
+
+@app.get("/api/positional_stocks_midcap/status")
+def get_positional_stocks_midcap_status() -> dict:
+    if positional_stocks_midcap_engine is None:
+        return {"enabled": False, "open_positions": {}, "closed_positions": [], "metrics": {}}
+    return {
+        "enabled": True,
+        "open_positions": {sym: p.to_dict() for sym, p in positional_stocks_midcap_engine.open_positions.items()},
+        "closed_positions": [p.to_dict() for p in positional_stocks_midcap_engine.closed_positions],
+        "metrics": positional_stocks_midcap_engine.metrics(),
+    }
+
+
+@app.post("/api/positional_stocks_midcap/trigger")
+async def trigger_positional_stocks_midcap(x_trigger_key: Optional[str] = Header(default=None)) -> dict:
+    """Manually force one midcap positional-stocks analysis pass. Same
+    auth/semantics as /api/positional_stocks/trigger -- see that endpoint's
+    docstring."""
+    expected_key = os.getenv("TRIGGER_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="TRIGGER_API_KEY not configured on server")
+    if x_trigger_key != expected_key:
+        raise HTTPException(status_code=403, detail="invalid or missing X-Trigger-Key header")
+    if positional_stocks_midcap_runtime_wrapper is None:
+        raise HTTPException(status_code=503, detail="positional_stocks_midcap_risk not enabled in config")
+    result = await positional_stocks_midcap_runtime_wrapper.check_once_per_day(force=True)
+    return result
+
+
+@app.get("/api/positional_stocks_smallcap/status")
+def get_positional_stocks_smallcap_status() -> dict:
+    if positional_stocks_smallcap_engine is None:
+        return {"enabled": False, "open_positions": {}, "closed_positions": [], "metrics": {}}
+    return {
+        "enabled": True,
+        "open_positions": {sym: p.to_dict() for sym, p in positional_stocks_smallcap_engine.open_positions.items()},
+        "closed_positions": [p.to_dict() for p in positional_stocks_smallcap_engine.closed_positions],
+        "metrics": positional_stocks_smallcap_engine.metrics(),
+    }
+
+
+@app.post("/api/positional_stocks_smallcap/trigger")
+async def trigger_positional_stocks_smallcap(x_trigger_key: Optional[str] = Header(default=None)) -> dict:
+    """Manually force one smallcap positional-stocks analysis pass. Same
+    auth/semantics as /api/positional_stocks/trigger -- see that endpoint's
+    docstring."""
+    expected_key = os.getenv("TRIGGER_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="TRIGGER_API_KEY not configured on server")
+    if x_trigger_key != expected_key:
+        raise HTTPException(status_code=403, detail="invalid or missing X-Trigger-Key header")
+    if positional_stocks_smallcap_runtime_wrapper is None:
+        raise HTTPException(status_code=503, detail="positional_stocks_smallcap_risk not enabled in config")
+    result = await positional_stocks_smallcap_runtime_wrapper.check_once_per_day(force=True)
     return result
 
 

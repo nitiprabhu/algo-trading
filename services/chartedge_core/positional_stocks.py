@@ -268,26 +268,32 @@ class PositionalStocksEngine:
     unlike the single-open-trade weekly options module."""
 
     def __init__(self, capital: float = 100000.0, max_positions: int = 4,
-                 stop_loss_pct: float = 6.0, target_pct: float = 12.0):
+                 stop_loss_pct: float = 6.0, target_pct: float = 12.0, pool: str = "largecap",
+                 confidence_sizing: bool = False):
         from services.chartedge_core.database import create_db_and_tables
         create_db_and_tables()  # idempotent CREATE TABLE IF NOT EXISTS; ensures StockPositionRecord exists
         self.capital = capital
         self.max_positions = max_positions
         self.stop_loss_pct = stop_loss_pct
         self.target_pct = target_pct
+        self.pool = pool  # separates capital pools (e.g. "largecap" vs "midcap") sharing one DB table
+        # confidence_sizing=True: position size scales with confluence score strength
+        # instead of a fixed capital/max_positions slot per name -- stronger signals get
+        # a bigger allocation, capped by remaining deployable capital in the pool.
+        self.confidence_sizing = confidence_sizing
         self.open_positions: dict[str, StockPosition] = {}
         self.closed_positions: list[StockPosition] = []
         self._load()
 
     def _load(self) -> None:
         from services.chartedge_core.database import get_open_stock_positions, get_closed_stock_positions
-        for rec in get_open_stock_positions():
+        for rec in get_open_stock_positions(pool=self.pool):
             pos = StockPosition(
                 id=rec.position_id, symbol=rec.symbol, entry_date=rec.entry_date,
                 entry_price=rec.entry_price, quantity=rec.quantity, status=rec.status,
             )
             self.open_positions[rec.symbol] = pos
-        for rec in get_closed_stock_positions():
+        for rec in get_closed_stock_positions(pool=self.pool):
             self.closed_positions.append(StockPosition(
                 id=rec.position_id, symbol=rec.symbol, entry_date=rec.entry_date,
                 entry_price=rec.entry_price, quantity=rec.quantity, status=rec.status,
@@ -297,6 +303,22 @@ class PositionalStocksEngine:
 
     def slot_capital(self) -> float:
         return self.capital / self.max_positions
+
+    def deployed_capital(self) -> float:
+        return sum(p.entry_price * p.quantity for p in self.open_positions.values())
+
+    def _sized_allocation(self, price: float, score: float, buy_threshold: float) -> float:
+        """Confidence-weighted slot size: 1x base slot at the buy_threshold,
+        scaling up to 2x base slot as score approaches its max, capped by
+        whatever capital is still undeployed in the pool. Score is always
+        >= buy_threshold here (gated by the caller)."""
+        available = self.capital - self.deployed_capital()
+        if not self.confidence_sizing:
+            return min(self.slot_capital(), available)
+        confidence_ratio = score / buy_threshold if buy_threshold > 0 else 1.0
+        multiplier = min(max(confidence_ratio, 1.0), 2.0)
+        desired = self.slot_capital() * multiplier
+        return min(desired, available)
 
     def maybe_enter(self, symbol: str, today: date, price: float, score: float,
                      buy_threshold: float, adx_value: float, min_adx: float = 25.0,
@@ -317,7 +339,8 @@ class PositionalStocksEngine:
         if not trend_confirmed:
             return None
 
-        quantity = int(self.slot_capital() // price) if price > 0 else 0
+        alloc = self._sized_allocation(price, score, buy_threshold)
+        quantity = int(alloc // price) if price > 0 else 0
         if quantity <= 0:
             return None
 
@@ -327,7 +350,7 @@ class PositionalStocksEngine:
             entry_price=round(price, 2), quantity=quantity,
         )
         self.open_positions[symbol] = position
-        persist_stock_entry(symbol, position.entry_date, position.entry_price, quantity)
+        persist_stock_entry(symbol, position.entry_date, position.entry_price, quantity, pool=self.pool)
         return position
 
     def check_exit(self, symbol: str, today: date, price: float, score: float,
@@ -364,6 +387,12 @@ class PositionalStocksEngine:
         if reason is None:
             return None
 
+        return self._finalize_close(symbol, today, price, reason)
+
+    def _finalize_close(self, symbol: str, today: date, price: float, reason: str) -> StockPosition:
+        pos = self.open_positions[symbol]
+        pnl_pct = (price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price else 0
+        pos.peak_pnl_pct = max(pos.peak_pnl_pct, pnl_pct)
         pos.exit_date = today.strftime("%Y-%m-%d")
         pos.exit_price = round(price, 2)
         pos.exit_reason = reason
@@ -377,6 +406,44 @@ class PositionalStocksEngine:
         self.closed_positions.append(pos)
         del self.open_positions[symbol]
         return pos
+
+    def maybe_rotate_and_enter(self, symbol: str, today: date, price: float, score: float,
+                                buy_threshold: float, open_scores: dict[str, float],
+                                open_prices: dict[str, float], trail_arm_pct: float = 3.0,
+                                rotation_margin: float = 0.15) -> Optional[tuple[StockPosition, StockPosition]]:
+        """Portfolio-manager-style capital rotation. Call this only after
+        maybe_enter() has already returned None purely because the pool is
+        full (max_positions reached or capital fully deployed) -- the caller
+        is responsible for having already confirmed score/ADX/trend_gate all
+        qualify. Finds the weakest currently open position (lowest today's
+        confluence score, from open_scores) and, only if the new signal
+        beats it by rotation_margin AND that position hasn't already proven
+        itself as a runner (peak gain still below trail_arm_pct, so no
+        trailing-stop profit lock is active), force-sells it and reinvests
+        the freed capital into the new signal. Returns (closed_position,
+        new_position) on a rotation, or None if no rotation happened."""
+        if symbol in self.open_positions or not self.open_positions:
+            return None
+
+        candidates = [
+            (sym, open_scores[sym]) for sym in self.open_positions
+            if sym in open_scores and self.open_positions[sym].peak_pnl_pct < trail_arm_pct
+        ]
+        if not candidates:
+            return None
+
+        weakest_symbol, weakest_score = min(candidates, key=lambda x: x[1])
+        if score - weakest_score < rotation_margin:
+            return None
+        if weakest_symbol not in open_prices:
+            return None
+
+        closed = self._finalize_close(weakest_symbol, today, open_prices[weakest_symbol], "ROTATED_OUT")
+        opened = self.maybe_enter(symbol, today, price, score, buy_threshold, adx_value=999.0,
+                                   min_adx=0.0, trend_confirmed=True)
+        if opened is None:
+            return None  # freed capital but couldn't size an entry (e.g. price > freed capital) -- position stays closed
+        return closed, opened
 
     def metrics(self) -> dict:
         n = len(self.closed_positions)

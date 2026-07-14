@@ -394,6 +394,7 @@ class StockPositionRecord(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     position_id: str = Field(index=True, unique=True)  # UUID
     symbol: str = Field(index=True)  # e.g., SBIN, VEDL, ONGC
+    pool: str = Field(default="largecap", index=True)  # "largecap" or "midcap" -- separate capital pools share this table
     entry_date: str  # YYYY-MM-DD
     entry_price: float
     quantity: int
@@ -409,7 +410,8 @@ class StockPositionRecord(SQLModel, table=True):
     expires_at: Optional[datetime] = None  # Auto-set on close: updated_at + 180 days
 
 
-def persist_stock_entry(symbol: str, entry_date: str, entry_price: float, quantity: int) -> Optional[StockPositionRecord]:
+def persist_stock_entry(symbol: str, entry_date: str, entry_price: float, quantity: int,
+                         pool: str = "largecap") -> Optional[StockPositionRecord]:
     """Save stock position entry."""
     if not DATABASE_URL:
         return None
@@ -419,6 +421,7 @@ def persist_stock_entry(symbol: str, entry_date: str, entry_price: float, quanti
             record = StockPositionRecord(
                 position_id=str(uuid4()),
                 symbol=symbol,
+                pool=pool,
                 entry_date=entry_date,
                 entry_price=entry_price,
                 quantity=quantity,
@@ -464,13 +467,15 @@ def persist_stock_exit(position_id: str, exit_date: str, exit_price: float,
         return None
 
 
-def get_open_stock_positions() -> List[StockPositionRecord]:
-    """Fetch all open stock positions."""
+def get_open_stock_positions(pool: str = "largecap") -> List[StockPositionRecord]:
+    """Fetch all open stock positions for the given capital pool."""
     if not DATABASE_URL:
         return []
     try:
         with Session(engine) as session:
-            statement = select(StockPositionRecord).where(StockPositionRecord.status == "OPEN")
+            statement = select(StockPositionRecord).where(
+                StockPositionRecord.status == "OPEN", StockPositionRecord.pool == pool
+            )
             results = session.exec(statement)
             return list(results.all())
     except Exception as e:
@@ -478,15 +483,15 @@ def get_open_stock_positions() -> List[StockPositionRecord]:
         return []
 
 
-def get_closed_stock_positions(limit: int = 100) -> List[StockPositionRecord]:
-    """Fetch recent closed stock positions."""
+def get_closed_stock_positions(limit: int = 100, pool: str = "largecap") -> List[StockPositionRecord]:
+    """Fetch recent closed stock positions for the given capital pool."""
     if not DATABASE_URL:
         return []
     try:
         with Session(engine) as session:
             statement = (
                 select(StockPositionRecord)
-                .where(StockPositionRecord.status == "CLOSED")
+                .where(StockPositionRecord.status == "CLOSED", StockPositionRecord.pool == pool)
                 .order_by(StockPositionRecord.exit_date.desc())
                 .limit(limit)
             )

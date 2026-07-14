@@ -206,6 +206,89 @@ positional_stocks_risk:
   symbols: [SBIN, ADANIENT, VEDL, ONGC, HINDALCO]  # top 5 by 12mo backtest CAGR (22.69%)
   check_after_time: "15:35"  # IST cutoff -- runs once per day after this time, not every 5 min
 
+positional_stocks_midcap_risk:
+  # Midcap + Nifty Next50 sibling of positional_stocks_risk above -- same
+  # engine (positional_stocks.py), same signal/exit logic, own capital pool
+  # and own "midcap" tag on the shared StockPositionRecord table (see
+  # database.py pool column). Universe: 122-symbol Nifty Midcap150 + Next50
+  # screen (2yr yfinance daily data, isolated-capital screen per symbol via
+  # screen_positional_stocks.py), top 8 by screen return% selected here.
+  #
+  # Portfolio backtest (run_positional_stocks_backtest.py, max_positions=8,
+  # last 12mo): 74 trades, 66.2% win rate, +26.55% return -> 26.99% CAGR,
+  # 3.03x profit factor -- beats the largecap 5-stock CAGR (22.69%) and has
+  # a better profit factor than the midcap top-5 (2.79x) or top-10 (2.82x,
+  # CAGR drops to 23.4% -- HAL was net-negative and diluted returns).
+  # Do not add HAL back without re-backtesting; do not shrink below 8
+  # without checking single-name concentration risk (2 Adani-family names
+  # in a wider top-10 basket are correlated, not real diversification).
+  enabled: true
+  capital: 100000.0
+  max_positions: 8
+  confidence_sizing: true  # per-user request: no fixed equal slot -- stronger confluence
+                            # score gets a bigger allocation (1x-2x base slot), capped by
+                            # remaining undeployed capital in the 1L pool. See
+                            # PositionalStocksEngine._sized_allocation in positional_stocks.py.
+  allow_rotation: true     # per-user request: act like a portfolio manager -- when the pool
+                            # is fully deployed and a new signal qualifies but has nowhere to
+                            # go, sell the weakest open holding (lowest today's confluence
+                            # score, and only if it hasn't already proven itself as a trailing
+                            # winner) to free capital for the stronger new pick. See
+                            # PositionalStocksEngine.maybe_rotate_and_enter.
+  rotation_margin: 0.15    # new signal's score must beat the weakest holding's by this much
+  stop_loss_pct: 4.0
+  target_pct: 12.0
+  buy_threshold: 0.35
+  sell_threshold: -0.35
+  min_adx: 25.0
+  require_trend_gate: true
+  trail_arm_pct: 3.0
+  trail_keep_frac: 0.5
+  yfinance_period: "2y"
+  symbols: [LAURUSLABS, "M&MFIN", ASHOKLEY, IDEA, ADANIENSOL, MUTHOOTFIN, FEDERALBNK, NYKAA]
+  check_after_time: "15:35"
+
+positional_stocks_smallcap_risk:
+  # Smallcap + microcap sibling of positional_stocks_risk / positional_stocks_midcap_risk
+  # above -- same engine, same signal/exit logic, own "smallcap" capital pool. Universe:
+  # 369-symbol Nifty Smallcap250 + Microcap250 screen (2yr yfinance daily data, isolated
+  # per-symbol capital via screen_positional_stocks.py), top 10 by screen return% selected.
+  #
+  # Portfolio backtest (run_positional_stocks_backtest.py, max_positions=10, last 12mo):
+  # 109 trades, 63.3% win rate, +44.19% return -> 44.96% CAGR, 3.34x profit factor.
+  # Top-5/top-8 subsets of this same list backtested even higher (70.7% / 51.7% CAGR)
+  # but are more concentrated -- STLTECH alone was ~35% of top-5's PnL. User chose the
+  # full top-10 for the diversification.
+  #
+  # IMPORTANT CAVEAT (do not remove): this tier is materially riskier than largecap/midcap.
+  # Screen spread ran +168% (BGRENERGY) to -86% (HERCULES) -- 2-3x the volatility of
+  # midcap. Backtest fills assume execution at the daily close; several of these names
+  # (e.g. BGRENERGY, DIACABS, APCOTEXIND) are thin-volume microcaps where a real order
+  # from a 1L pool can move the price, and NSE circuit bands (5-10% on many smallcaps)
+  # can gap past a modeled stop-loss with no fill that day. Treat backtest CAGR as a
+  # ceiling, not a forecast.
+  #
+  # Capital budget: largecap (1L) + midcap (1L) + smallcap (1L) = 3L total, per user's
+  # explicit portfolio-wide cap. Do not raise this pool's capital without cutting another
+  # pool to stay under 3L combined.
+  enabled: true
+  capital: 100000.0
+  max_positions: 10
+  confidence_sizing: true
+  allow_rotation: true
+  rotation_margin: 0.15
+  stop_loss_pct: 4.0
+  target_pct: 12.0
+  buy_threshold: 0.35
+  sell_threshold: -0.35
+  min_adx: 25.0
+  require_trend_gate: true
+  trail_arm_pct: 3.0
+  trail_keep_frac: 0.5
+  yfinance_period: "2y"
+  symbols: [BGRENERGY, STLTECH, AXISCADES, HFCL, NATIONALUM, SOLARINDS, HINDCOPPER, DIACABS, INDIGRID, APCOTEXIND]
+  check_after_time: "15:35"
+
 futures_risk:
   NIFTY_FUT:
     lot_size: 75

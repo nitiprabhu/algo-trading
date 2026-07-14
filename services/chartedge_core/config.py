@@ -29,6 +29,8 @@ class Config(BaseModel):
     futures_risk: dict[str, Any] = {}
     positional_risk: dict[str, Any] = {}
     positional_stocks_risk: dict[str, Any] = {}
+    positional_stocks_midcap_risk: dict[str, Any] = {}
+    positional_stocks_smallcap_risk: dict[str, Any] = {}
 
     @property
     def costs_config(self) -> dict[str, Any]:

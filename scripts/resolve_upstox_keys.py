@@ -50,25 +50,32 @@ def load_instruments() -> list[dict]:
 
 def main() -> None:
     instruments = load_instruments()
-    # Index equity instruments by trading_symbol. Upstox equity segment is
-    # "NSE_EQ"; instrument_type "EQ" excludes F&O/ETF lookalikes.
-    by_symbol: dict[str, str] = {}
+    # Index cash-segment instruments by trading_symbol. Upstox cash segment is
+    # "NSE_EQ". Accept the tradeable delivery types:
+    #   EQ = normal equity, BE = Trade-to-Trade/surveillance equity (compulsory
+    #   delivery, tighter circuits), IV = InvIT (e.g. INDIGRID -- a trust, not a
+    #   stock). All three are delivery-tradeable; non-EQ ones are flagged below
+    #   so you know what you're actually buying.
+    ALLOWED = {"EQ", "BE", "IV"}
+    by_symbol: dict[str, tuple[str, str]] = {}
     for row in instruments:
-        if row.get("segment") == "NSE_EQ" and row.get("instrument_type") == "EQ":
+        if row.get("segment") == "NSE_EQ" and row.get("instrument_type") in ALLOWED:
             ts = row.get("trading_symbol") or row.get("tradingsymbol")
             key = row.get("instrument_key")
             if ts and key:
-                by_symbol[ts.upper()] = key
+                by_symbol[ts.upper()] = (key, row.get("instrument_type"))
 
     print("\n# paste under live_trading.instrument_keys in shared/config.yaml")
     print("  instrument_keys:")
     missing = []
     for sym in SYMBOLS:
-        key = by_symbol.get(sym.upper())
-        if key:
+        hit = by_symbol.get(sym.upper())
+        if hit:
+            key, itype = hit
             # quote symbols with special chars (e.g. M&MFIN) for valid YAML
             name = f'"{sym}"' if any(c in sym for c in "&:") else sym
-            print(f"    {name}: \"{key}\"")
+            flag = "" if itype == "EQ" else f"  # {itype} -- not normal equity, review"
+            print(f"    {name}: \"{key}\"{flag}")
         else:
             missing.append(sym)
 

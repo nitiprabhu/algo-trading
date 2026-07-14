@@ -60,6 +60,14 @@ ORDER_DETAILS_PATH = "/order/details"
 UPSTOX_GTT_BASE = os.getenv("UPSTOX_GTT_BASE", "https://api.upstox.com/v3")
 PLACE_GTT_PATH = "/order/gtt/place"
 
+# Sandbox (safe test env, real API + fake fills, no money). Token is 30-day,
+# generated from the Upstox developer console -- does NOT follow the daily
+# production expiry, so in sandbox we read it straight from env and skip the
+# date gate. GTT is not yet available in sandbox (phased rollout) -> the stop
+# leg is expected to fail there; that failure is surfaced, not swallowed.
+SANDBOX_API_BASE = os.getenv("UPSTOX_SANDBOX_API_BASE", "https://api-sandbox.upstox.com/v2")
+SANDBOX_GTT_BASE = os.getenv("UPSTOX_SANDBOX_GTT_BASE", "https://api-sandbox.upstox.com/v3")
+
 TOKEN_FILE = Path(os.getenv("UPSTOX_TOKEN_FILE", "data/upstox_token.json"))
 
 # Product code for delivery (CNC-equivalent) -- positional swing = delivery,
@@ -102,6 +110,10 @@ class UpstoxBroker:
         self.cfg = cfg or {}
         self.enabled: bool = bool(self.cfg.get("enabled", False))
         self.dry_run: bool = bool(self.cfg.get("dry_run", True))
+        # sandbox: point at Upstox test env (real API, fake fills, no money).
+        self.sandbox: bool = bool(self.cfg.get("sandbox", False))
+        self._api_base = SANDBOX_API_BASE if self.sandbox else UPSTOX_API_BASE
+        self._gtt_base = SANDBOX_GTT_BASE if self.sandbox else UPSTOX_GTT_BASE
         self.gtt_stop_pct: float = float(self.cfg.get("gtt_stop_pct", 4.0))
         self.order_type: str = str(self.cfg.get("order_type", "MARKET")).upper()
         # symbol -> Upstox instrument_key (e.g. "NSE_EQ|INE528G01035"). Orders
@@ -116,10 +128,14 @@ class UpstoxBroker:
         return self.enabled and not self.dry_run
 
     def get_valid_token(self) -> Optional[str]:
-        """Return today's Upstox access token, or None if absent/stale.
+        """Return the usable Upstox access token, or None if absent/stale.
 
-        Stale-by-date is treated as no-token on purpose: an expired token
-        must never be sent (Upstox would reject, but we fail closed anyway)."""
+        Sandbox: the 30-day console token from env UPSTOX_SANDBOX_TOKEN, no
+        date gate (it doesn't follow the daily expiry).
+        Production: today's token from the webhook file, rejected if its date
+        != today -- an expired token must never be sent (fail closed)."""
+        if self.sandbox:
+            return os.getenv("UPSTOX_SANDBOX_TOKEN") or None
         try:
             if not TOKEN_FILE.exists():
                 return None
@@ -190,7 +206,7 @@ class UpstoxBroker:
                 "trigger_price": 0,
                 "is_amo": False,
             }
-            resp = requests.post(f"{UPSTOX_API_BASE}{PLACE_ORDER_PATH}",
+            resp = requests.post(f"{self._api_base}{PLACE_ORDER_PATH}",
                                  headers=self._headers(token), json=body, timeout=15)
             if resp.status_code not in (200, 201):
                 return OrderResult(ok=False, simulated=False,
@@ -234,7 +250,7 @@ class UpstoxBroker:
                 "trigger_price": trigger,
             }],
         }
-        resp = requests.post(f"{UPSTOX_GTT_BASE}{PLACE_GTT_PATH}",
+        resp = requests.post(f"{self._gtt_base}{PLACE_GTT_PATH}",
                              headers=self._headers(token), json=body, timeout=15)
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"GTT HTTP {resp.status_code}: {resp.text[:200]}")
@@ -270,7 +286,7 @@ class UpstoxBroker:
                 "transaction_type": "SELL", "disclosed_quantity": 0,
                 "trigger_price": 0, "is_amo": False,
             }
-            resp = requests.post(f"{UPSTOX_API_BASE}{PLACE_ORDER_PATH}",
+            resp = requests.post(f"{self._api_base}{PLACE_ORDER_PATH}",
                                  headers=self._headers(token), json=body, timeout=15)
             if resp.status_code not in (200, 201):
                 return OrderResult(ok=False, simulated=False,

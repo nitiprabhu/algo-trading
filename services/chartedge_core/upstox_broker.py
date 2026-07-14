@@ -68,6 +68,37 @@ PLACE_GTT_PATH = "/order/gtt/place"
 SANDBOX_API_BASE = os.getenv("UPSTOX_SANDBOX_API_BASE", "https://api-sandbox.upstox.com/v2")
 SANDBOX_GTT_BASE = os.getenv("UPSTOX_SANDBOX_GTT_BASE", "https://api-sandbox.upstox.com/v3")
 
+# Access-token-request (WhatsApp/in-app approval) flow. POST here to fire the
+# approval push; on approve, Upstox delivers the token to the notifier webhook
+# configured on the Upstox app (point it at /api/upstox/token_webhook).
+UPSTOX_AUTH_BASE = os.getenv("UPSTOX_AUTH_BASE", "https://api.upstox.com/v3")
+TOKEN_REQUEST_PATH = "/login/auth/token/request"  # + /{api_key}
+
+
+def request_access_token() -> dict[str, Any]:
+    """Fire the Upstox access-token-request -> triggers the daily WhatsApp/
+    in-app approval push. Returns {ok, ...}. The token itself is NOT returned
+    here; on approval Upstox POSTs it to the configured notifier webhook
+    (api.py /api/upstox/token_webhook). Fails soft -- never raises."""
+    api_key = os.getenv("UPSTOX_API_KEY")
+    secret = os.getenv("UPSTOX_API_SECRET")
+    if not api_key or not secret:
+        return {"ok": False, "reason": "UPSTOX_API_KEY / UPSTOX_API_SECRET not set"}
+    url = f"{UPSTOX_AUTH_BASE}{TOKEN_REQUEST_PATH}/{api_key}"
+    try:
+        resp = requests.post(
+            url,
+            headers={"accept": "application/json", "Content-Type": "application/json"},
+            json={"client_secret": secret}, timeout=15,
+        )
+        if resp.status_code != 200:
+            return {"ok": False, "reason": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+        data = resp.json().get("data", {})
+        return {"ok": True, "authorization_expiry": data.get("authorization_expiry"),
+                "notifier_url": data.get("notifier_url")}
+    except Exception as e:
+        return {"ok": False, "reason": f"exception: {e}"}
+
 TOKEN_FILE = Path(os.getenv("UPSTOX_TOKEN_FILE", "data/upstox_token.json"))
 
 # Product code for delivery (CNC-equivalent) -- positional swing = delivery,

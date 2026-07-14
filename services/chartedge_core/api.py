@@ -213,6 +213,43 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(900)
         asyncio.create_task(positional_stocks_smallcap_loop())
 
+    # Daily Upstox token-request auto-fire: sends the WhatsApp/in-app approval
+    # push once per day at live_trading.request_token_time (IST, default 15:00),
+    # ahead of the 15:35 positional run. You approve on your phone; the token
+    # lands on /api/upstox/token_webhook. Only runs for real live trading
+    # (enabled, not sandbox) -- sandbox uses a 30-day token, no daily push.
+    if _live_trading_cfg.get("enabled", False) and not _live_trading_cfg.get("sandbox", False):
+        from datetime import datetime as _dtt
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        _req_time = str(_live_trading_cfg.get("request_token_time", "15:00"))
+
+        async def upstox_token_request_loop():
+            _fired_on = None
+            while True:
+                try:
+                    now = _dtt.now(_ZoneInfo("Asia/Kolkata"))
+                    hh, mm = (int(x) for x in _req_time.split(":"))
+                    today = now.strftime("%Y-%m-%d")
+                    # fire once, at/after the target time, on weekdays only
+                    if (_fired_on != today and now.weekday() < 5
+                            and (now.hour, now.minute) >= (hh, mm)):
+                        from services.chartedge_core.upstox_broker import request_access_token
+                        res = request_access_token()
+                        _fired_on = today
+                        print(f"[Upstox] daily token request fired: {res}")
+                        try:
+                            from services.chartedge_core.telegram import notifier as _n
+                            msg = ("[UPSTOX] approve the token request on your phone (WhatsApp/app) "
+                                   "to arm live orders for today." if res.get("ok")
+                                   else f"⚠️ [UPSTOX] token request failed: {res.get('reason')}")
+                            await _n.send_message(msg)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f"⚠️ [Upstox] token-request loop error: {e}")
+                await asyncio.sleep(60)
+        asyncio.create_task(upstox_token_request_loop())
+
     # Cleanup expired records daily (TTL: 30 days for positional trades, 180 days for stock positions)
     async def cleanup_loop():
         while True:
@@ -425,9 +462,35 @@ async def upstox_token_webhook(request: Request) -> dict:
     today = _dt.now(_ZI("Asia/Kolkata")).strftime("%Y-%m-%d")
     token_path = _Path(os.getenv("UPSTOX_TOKEN_FILE", "data/upstox_token.json"))
     token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(_json.dumps({"date": today, "access_token": token}))
-    print(f"[Upstox] daily token stored for {today}")
+    # date drives the daily validity gate in UpstoxBroker.get_valid_token();
+    # expires_at (epoch ms from Upstox) kept for reference/observability.
+    token_path.write_text(_json.dumps({
+        "date": today, "access_token": token,
+        "expires_at": payload.get("expires_at"),
+        "message_type": payload.get("message_type"),
+    }))
+    print(f"[Upstox] daily token stored for {today} (expires_at={payload.get('expires_at')})")
+    try:
+        from services.chartedge_core.telegram import notifier as _n
+        await _n.send_message(f"[UPSTOX] daily token received + stored for {today}. Live orders armed for today.")
+    except Exception:
+        pass
     return {"stored": True, "date": today}
+
+
+@app.post("/api/upstox/request_token")
+async def upstox_request_token(x_trigger_key: Optional[str] = Header(default=None)) -> dict:
+    """Manually fire the Upstox access-token-request -> sends the WhatsApp/
+    in-app approval push to you. Approve it and the token lands on
+    /api/upstox/token_webhook. Same TRIGGER_API_KEY auth as the other
+    trigger endpoints. Also fired automatically once/day (see loop below)."""
+    expected_key = os.getenv("TRIGGER_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="TRIGGER_API_KEY not configured on server")
+    if x_trigger_key != expected_key:
+        raise HTTPException(status_code=403, detail="invalid or missing X-Trigger-Key header")
+    from services.chartedge_core.upstox_broker import request_access_token
+    return request_access_token()
 
 
 @app.get("/api/upstox/token_status")

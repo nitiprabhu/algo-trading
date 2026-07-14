@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 # Load .env before other imports that might use env vars
 load_dotenv()
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from typing import Optional
@@ -141,6 +141,16 @@ if _positional_stocks_smallcap_cfg.get("enabled", False):
     )
     print("DEBUG: Positional stocks smallcap engine enabled")
 
+# Live-trading broker singleton (Upstox REST). Initialized from the
+# live_trading config block; defaults keep it OFF + dry-run so importing/
+# starting the app never risks a real order. The positional runtimes call
+# live_broker() (no args) to reach this same instance.
+from services.chartedge_core.upstox_broker import live_broker as _init_live_broker
+_live_trading_cfg = config.live_trading or {}
+_init_live_broker(_live_trading_cfg)
+print(f"DEBUG: Live broker wired (enabled={_live_trading_cfg.get('enabled', False)}, "
+      f"dry_run={_live_trading_cfg.get('dry_run', True)})")
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
@@ -202,6 +212,43 @@ async def lifespan(app: FastAPI):
                     print(f"⚠️ [Positional Stocks Smallcap] check failed: {e}")
                 await asyncio.sleep(900)
         asyncio.create_task(positional_stocks_smallcap_loop())
+
+    # Daily Upstox token-request auto-fire: sends the WhatsApp/in-app approval
+    # push once per day at live_trading.request_token_time (IST, default 15:00),
+    # ahead of the 15:35 positional run. You approve on your phone; the token
+    # lands on /api/upstox/token_webhook. Only runs for real live trading
+    # (enabled, not sandbox) -- sandbox uses a 30-day token, no daily push.
+    if _live_trading_cfg.get("enabled", False) and not _live_trading_cfg.get("sandbox", False):
+        from datetime import datetime as _dtt
+        from zoneinfo import ZoneInfo as _ZoneInfo
+        _req_time = str(_live_trading_cfg.get("request_token_time", "15:00"))
+
+        async def upstox_token_request_loop():
+            _fired_on = None
+            while True:
+                try:
+                    now = _dtt.now(_ZoneInfo("Asia/Kolkata"))
+                    hh, mm = (int(x) for x in _req_time.split(":"))
+                    today = now.strftime("%Y-%m-%d")
+                    # fire once, at/after the target time, on weekdays only
+                    if (_fired_on != today and now.weekday() < 5
+                            and (now.hour, now.minute) >= (hh, mm)):
+                        from services.chartedge_core.upstox_broker import request_access_token
+                        res = request_access_token()
+                        _fired_on = today
+                        print(f"[Upstox] daily token request fired: {res}")
+                        try:
+                            from services.chartedge_core.telegram import notifier as _n
+                            msg = ("[UPSTOX] approve the token request on your phone (WhatsApp/app) "
+                                   "to arm live orders for today." if res.get("ok")
+                                   else f"⚠️ [UPSTOX] token request failed: {res.get('reason')}")
+                            await _n.send_message(msg)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f"⚠️ [Upstox] token-request loop error: {e}")
+                await asyncio.sleep(60)
+        asyncio.create_task(upstox_token_request_loop())
 
     # Cleanup expired records daily (TTL: 30 days for positional trades, 180 days for stock positions)
     async def cleanup_loop():
@@ -374,6 +421,92 @@ async def trigger_positional_stocks_smallcap(x_trigger_key: Optional[str] = Head
         raise HTTPException(status_code=503, detail="positional_stocks_smallcap_risk not enabled in config")
     result = await positional_stocks_smallcap_runtime_wrapper.check_once_per_day(force=True)
     return result
+
+
+@app.post("/api/upstox/token_webhook")
+async def upstox_token_webhook(request: Request) -> dict:
+    """Receives the daily Upstox access token after the user approves the
+    WhatsApp/in-app push (Upstox posts the token here). Stores it as
+    {"date": <today IST>, "access_token": ...} in UPSTOX_TOKEN_FILE, where
+    UpstoxBroker.get_valid_token() reads it. Accepts the token under any of
+    the common payload keys Upstox/user-proxy may use.
+
+    Secured by a shared secret: header X-Upstox-Webhook-Secret must match
+    env UPSTOX_WEBHOOK_SECRET (set it, and configure the same on the Upstox
+    app webhook). Without the env set, the endpoint refuses to store -- so a
+    stray/forged POST can't inject a token."""
+    import json as _json
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+    from pathlib import Path as _Path
+
+    expected = os.getenv("UPSTOX_WEBHOOK_SECRET")
+    if not expected:
+        raise HTTPException(status_code=503, detail="UPSTOX_WEBHOOK_SECRET not configured on server")
+    if request.headers.get("x-upstox-webhook-secret") != expected:
+        raise HTTPException(status_code=403, detail="invalid webhook secret")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
+
+    token = (
+        payload.get("access_token")
+        or payload.get("token")
+        or (payload.get("data") or {}).get("access_token")
+    )
+    if not token:
+        raise HTTPException(status_code=400, detail="no access_token in payload")
+
+    today = _dt.now(_ZI("Asia/Kolkata")).strftime("%Y-%m-%d")
+    token_path = _Path(os.getenv("UPSTOX_TOKEN_FILE", "data/upstox_token.json"))
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    # date drives the daily validity gate in UpstoxBroker.get_valid_token();
+    # expires_at (epoch ms from Upstox) kept for reference/observability.
+    token_path.write_text(_json.dumps({
+        "date": today, "access_token": token,
+        "expires_at": payload.get("expires_at"),
+        "message_type": payload.get("message_type"),
+    }))
+    print(f"[Upstox] daily token stored for {today} (expires_at={payload.get('expires_at')})")
+    try:
+        from services.chartedge_core.telegram import notifier as _n
+        await _n.send_message(f"[UPSTOX] daily token received + stored for {today}. Live orders armed for today.")
+    except Exception:
+        pass
+    return {"stored": True, "date": today}
+
+
+@app.post("/api/upstox/request_token")
+async def upstox_request_token(x_trigger_key: Optional[str] = Header(default=None)) -> dict:
+    """Manually fire the Upstox access-token-request -> sends the WhatsApp/
+    in-app approval push to you. Approve it and the token lands on
+    /api/upstox/token_webhook. Same TRIGGER_API_KEY auth as the other
+    trigger endpoints. Also fired automatically once/day (see loop below)."""
+    expected_key = os.getenv("TRIGGER_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="TRIGGER_API_KEY not configured on server")
+    if x_trigger_key != expected_key:
+        raise HTTPException(status_code=403, detail="invalid or missing X-Trigger-Key header")
+    from services.chartedge_core.upstox_broker import request_access_token
+    return request_access_token()
+
+
+@app.get("/api/upstox/token_status")
+def upstox_token_status() -> dict:
+    """Non-secret health check: is a valid same-day token present? Lets you
+    confirm before 15:35 that the daemon will run live (not fall back to
+    paper). Never returns the token itself."""
+    from services.chartedge_core.upstox_broker import live_broker
+    broker = live_broker()
+    tok = broker.get_valid_token()
+    return {
+        "live_enabled": broker.enabled,
+        "dry_run": broker.dry_run,
+        "armed": broker.is_armed(),
+        "token_present_today": tok is not None,
+    }
 
 
 @app.get("/api/debug/option")

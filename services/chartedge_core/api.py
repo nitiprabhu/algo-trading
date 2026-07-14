@@ -512,6 +512,28 @@ def upstox_token_status() -> dict:
     }
 
 
+@app.post("/api/upstox/test_order")
+async def upstox_test_order(x_trigger_key: Optional[str] = Header(default=None)) -> dict:
+    """One-off manual test of the exact production order path (broker.place_entry),
+    independent of whether any positional-stocks signal fired today. Places a
+    1-share delivery BUY intent for SBIN through the same funds-check + GTT-stop
+    code the daily runtime uses -- with a ₹0/low account, expect a clean
+    fail-closed skip (no order, no money moved), which is itself a valid pass:
+    it proves the wiring works and money is protected. Does not touch the
+    paper DB. TRIGGER_API_KEY-gated, same as the other manual triggers."""
+    expected_key = os.getenv("TRIGGER_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="TRIGGER_API_KEY not configured on server")
+    if x_trigger_key != expected_key:
+        raise HTTPException(status_code=403, detail="invalid or missing X-Trigger-Key header")
+    from services.chartedge_core.upstox_broker import live_broker
+    broker = live_broker()
+    if not broker.enabled:
+        raise HTTPException(status_code=503, detail="live_trading not enabled")
+    result = broker.place_entry("SBIN", quantity=1, ref_price=800.0, tag="POS_TEST")
+    return result.to_dict()
+
+
 @app.get("/api/debug/option")
 def debug_option(symbol: str = "NIFTY", side: str = "BUY") -> dict:
     if symbol not in runtime.candles or not runtime.candles[symbol]:

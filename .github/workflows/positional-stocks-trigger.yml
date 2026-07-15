@@ -1,40 +1,20 @@
 name: Trigger Positional Stocks Analysis
 
-# Two scheduled jobs (GitHub Actions cron is the robust trigger -- it also
-# wakes a sleeping Render instance, which the in-process daily loops can't
-# rely on):
-#   1. token-request at 15:00 IST -> fires the Upstox WhatsApp/app approval
-#      push so a valid token is present before the 15:30 run. Approve on your
-#      phone. Skips harmlessly if live trading is off / not configured.
-#   2. analysis at 15:30 IST -> runs all three positional-stock pools
-#      (largecap + midcap + smallcap). Places live orders only if armed.
+# Single scheduled trigger at 15:00 IST (GitHub Actions cron -- also wakes a
+# sleeping Render free-tier instance, which the in-process daily loop can't
+# rely on). Runs all three positional-stock pools (largecap + midcap +
+# smallcap). The Upstox WhatsApp/app approval push is event-driven, not
+# scheduled separately here: positional_stocks_runtime.py fires it itself,
+# only at the moment a live-qualifying BUY/SELL is actually found and no
+# valid token exists yet (see upstox_broker.maybe_request_token()). No
+# signal that day -> no approval ask at all.
 on:
   schedule:
-    - cron: "0 9 * * 1-5"    # 14:30 IST -> Upstox token-request (WhatsApp push)
-    - cron: "30 9 * * 1-5"   # 15:00 IST -> positional analysis + orders (fills before 15:30 close)
+    - cron: "30 9 * * 1-5"   # 15:00 IST -> positional analysis (fills before 15:30 close)
   workflow_dispatch: {}
 
 jobs:
-  upstox-token:
-    # only the 15:00 schedule (and manual dispatch) fires the token request
-    if: github.event.schedule == '0 9 * * 1-5' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    environment: default
-    steps:
-      - name: Fire Upstox token-request (WhatsApp/app approval push)
-        run: |
-          response=$(curl -sS -w "\n%{http_code}" -X POST \
-            "${{ vars.CHARTEDGE_API_HOST }}/api/upstox/request_token" \
-            -H "X-Trigger-Key: ${{ secrets.TRIGGER_API_KEY }}")
-          http_code=$(echo "$response" | tail -n1)
-          echo "HTTP $http_code"; echo "$response" | sed '$d'
-          # 503 (live trading not configured) is not a failure -- token flow is optional
-          if [ "$http_code" -ge 400 ] && [ "$http_code" -ne 503 ]; then
-            echo "::error::token-request failed with HTTP $http_code"; exit 1
-          fi
-
   analysis:
-    if: github.event.schedule == '30 9 * * 1-5' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     environment: default
     strategy:

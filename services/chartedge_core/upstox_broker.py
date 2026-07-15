@@ -99,6 +99,26 @@ def request_access_token() -> dict[str, Any]:
     except Exception as e:
         return {"ok": False, "reason": f"exception: {e}"}
 
+
+_last_token_request_date: Optional[str] = None
+
+
+def maybe_request_token() -> Optional[dict[str, Any]]:
+    """Fire the WhatsApp/app approval push, but only once per day and only
+    when actually needed (called from the positional-stocks runtime the
+    moment a live-qualifying BUY/SELL is found and no valid token exists
+    yet) -- no blind daily nag on days with no signal. Process-wide dedupe
+    via _last_token_request_date so three pools finding signals in the same
+    run don't each fire a separate push. Returns the request_access_token()
+    result dict, or None if already fired today."""
+    global _last_token_request_date
+    today = _today_ist()
+    if _last_token_request_date == today:
+        return None
+    _last_token_request_date = today
+    return request_access_token()
+
+
 TOKEN_FILE = Path(os.getenv("UPSTOX_TOKEN_FILE", "data/upstox_token.json"))
 
 # Product code for delivery (CNC-equivalent) -- positional swing = delivery,

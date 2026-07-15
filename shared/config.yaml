@@ -368,8 +368,9 @@ live_trading:
                             # safe to arm with ₹0/low funds to test the pipeline.
   broker: upstox
   order_type: MARKET        # entries/exits at market (near-close). LIMIT possible later.
-  request_token_time: "14:30"  # IST -- auto-fire the WhatsApp token-request push
-                                #  before the 15:35 positional run (production only)
+  # WhatsApp/app token-approval push is event-driven, not scheduled here:
+  # positional_stocks_runtime.py fires it (deduped per day) only at the
+  # moment a live-qualifying BUY/SELL is found. No signal -> no ask.
   gtt_stop_pct: 4.0         # server-side GTT stop-loss %, matches engine stop_loss_pct.
                             # Lives on Upstox independent of the daily token -- protects
                             # open positions even if the daily approval is forgotten.

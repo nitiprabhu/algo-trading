@@ -185,6 +185,27 @@ class PositionalStocksRuntime:
         """Upstox order tag grouping this pool's live orders (<=40 chars)."""
         return f"POS_{self.engine.pool.upper()}"[:40]
 
+    async def _maybe_request_token(self, broker) -> None:
+        """Event-driven WhatsApp/app approval: only ask when there's actually
+        something to execute live and no valid token exists yet. No blind
+        daily nag on no-signal days. Deduped process-wide (see
+        upstox_broker.maybe_request_token) so multiple pools finding signals
+        in the same run don't spam separate pushes."""
+        if broker.get_valid_token() is not None:
+            return
+        from services.chartedge_core.upstox_broker import maybe_request_token
+        from services.chartedge_core.telegram import notifier
+        res = maybe_request_token()
+        if res is None:
+            return  # already asked today -- this order will paper-fallback, same as before
+        if res.get("ok"):
+            await notifier.send_message(
+                "[UPSTOX] a live signal fired -- approve the WhatsApp/app request now "
+                "to execute it today. Miss the window and it stays paper-only for today."
+            )
+        else:
+            await notifier.send_message(f"⚠️ [UPSTOX] token request failed: {res.get('reason')}")
+
     async def _live_entry(self, position, ref_price: float) -> None:
         """Fire a live Upstox BUY + protective GTT stop for a fresh entry.
         No-op unless live_trading is armed; on dry_run it just logs. Never
@@ -195,6 +216,8 @@ class PositionalStocksRuntime:
         broker = live_broker()
         if not broker.enabled:
             return  # live path entirely off -> pure paper, stay silent
+        if not broker.dry_run:
+            await self._maybe_request_token(broker)
         res = broker.place_entry(position.symbol, position.quantity, ref_price, self._live_tag())
         mode = "SIM" if res.simulated else "LIVE"
         if res.ok:
@@ -217,6 +240,8 @@ class PositionalStocksRuntime:
         broker = live_broker()
         if not broker.enabled:
             return
+        if not broker.dry_run:
+            await self._maybe_request_token(broker)
         res = broker.place_exit(position.symbol, position.quantity, self._live_tag())
         mode = "SIM" if res.simulated else "LIVE"
         if res.ok:

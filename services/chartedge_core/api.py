@@ -213,42 +213,11 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(900)
         asyncio.create_task(positional_stocks_smallcap_loop())
 
-    # Daily Upstox token-request auto-fire: sends the WhatsApp/in-app approval
-    # push once per day at live_trading.request_token_time (IST, default 15:00),
-    # ahead of the 15:35 positional run. You approve on your phone; the token
-    # lands on /api/upstox/token_webhook. Only runs for real live trading
-    # (enabled, not sandbox) -- sandbox uses a 30-day token, no daily push.
-    if _live_trading_cfg.get("enabled", False) and not _live_trading_cfg.get("sandbox", False):
-        from datetime import datetime as _dtt
-        from zoneinfo import ZoneInfo as _ZoneInfo
-        _req_time = str(_live_trading_cfg.get("request_token_time", "15:00"))
-
-        async def upstox_token_request_loop():
-            _fired_on = None
-            while True:
-                try:
-                    now = _dtt.now(_ZoneInfo("Asia/Kolkata"))
-                    hh, mm = (int(x) for x in _req_time.split(":"))
-                    today = now.strftime("%Y-%m-%d")
-                    # fire once, at/after the target time, on weekdays only
-                    if (_fired_on != today and now.weekday() < 5
-                            and (now.hour, now.minute) >= (hh, mm)):
-                        from services.chartedge_core.upstox_broker import request_access_token
-                        res = request_access_token()
-                        _fired_on = today
-                        print(f"[Upstox] daily token request fired: {res}")
-                        try:
-                            from services.chartedge_core.telegram import notifier as _n
-                            msg = ("[UPSTOX] approve the token request on your phone (WhatsApp/app) "
-                                   "to arm live orders for today." if res.get("ok")
-                                   else f"⚠️ [UPSTOX] token request failed: {res.get('reason')}")
-                            await _n.send_message(msg)
-                        except Exception:
-                            pass
-                except Exception as e:
-                    print(f"⚠️ [Upstox] token-request loop error: {e}")
-                await asyncio.sleep(60)
-        asyncio.create_task(upstox_token_request_loop())
+    # NOTE: the daily Upstox WhatsApp/app approval push is event-driven, not
+    # a blind daily auto-fire -- positional_stocks_runtime._maybe_request_token()
+    # fires it (deduped per day) from inside a pool's analysis run, only at
+    # the moment a live-qualifying BUY/SELL is actually found. No signal that
+    # day -> no approval ask at all. See upstox_broker.maybe_request_token().
 
     # Cleanup expired records daily (TTL: 30 days for positional trades, 180 days for stock positions)
     async def cleanup_loop():
@@ -510,6 +479,28 @@ def upstox_token_status() -> dict:
         "armed": broker.is_armed(),
         "token_present_today": tok is not None,
     }
+
+
+@app.post("/api/upstox/test_order")
+async def upstox_test_order(x_trigger_key: Optional[str] = Header(default=None)) -> dict:
+    """One-off manual test of the exact production order path (broker.place_entry),
+    independent of whether any positional-stocks signal fired today. Places a
+    1-share delivery BUY intent for SBIN through the same funds-check + GTT-stop
+    code the daily runtime uses -- with a ₹0/low account, expect a clean
+    fail-closed skip (no order, no money moved), which is itself a valid pass:
+    it proves the wiring works and money is protected. Does not touch the
+    paper DB. TRIGGER_API_KEY-gated, same as the other manual triggers."""
+    expected_key = os.getenv("TRIGGER_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="TRIGGER_API_KEY not configured on server")
+    if x_trigger_key != expected_key:
+        raise HTTPException(status_code=403, detail="invalid or missing X-Trigger-Key header")
+    from services.chartedge_core.upstox_broker import live_broker
+    broker = live_broker()
+    if not broker.enabled:
+        raise HTTPException(status_code=503, detail="live_trading not enabled")
+    result = broker.place_entry("SBIN", quantity=1, ref_price=800.0, tag="POS_TEST")
+    return result.to_dict()
 
 
 @app.get("/api/debug/option")

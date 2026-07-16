@@ -44,6 +44,21 @@ _positional_cfg = config.positional_risk or {}
 if _positional_cfg.get("enabled", False):
     from services.chartedge_core.positional_trading import PositionalTradingEngine
     from services.chartedge_core.positional_runtime import PositionalRuntime
+    from services.chartedge_core.positional_data_provider import IndstocksDataProvider, UpstoxDataProvider
+
+    # Data source is a plugin, not a full runtime swap: only spot/VIX/option
+    # chain/premium resolution is affected. One provider instance is shared
+    # across every engine (mode: parallel) since they all read the same
+    # NIFTY chain -- avoids redundant REST calls. env var mirrors the
+    # existing CHARTEDGE_DATA_SOURCE pattern (api.py:27).
+    _positional_data_source = os.getenv("POSITIONAL_DATA_SOURCE", _positional_cfg.get("data_source", "indstocks"))
+    if _positional_data_source == "upstox":
+        _positional_provider = UpstoxDataProvider()
+        print("DEBUG: Weekly positional data source: upstox")
+    else:
+        _positional_provider = IndstocksDataProvider(runtime)
+        print("DEBUG: Weekly positional data source: indstocks")
+
     if _positional_cfg.get("mode", "single") == "parallel":
         _parallel_specs = _positional_cfg.get("parallel") or []
         for spec in _parallel_specs:
@@ -60,7 +75,7 @@ if _positional_cfg.get("enabled", False):
                 print(f"⚠️ [Positional] Skipping malformed parallel entry {spec!r}: {e}")
                 continue
             positional_engines.append(eng)
-            positional_runtime_wrappers.append(PositionalRuntime(eng, _positional_cfg))
+            positional_runtime_wrappers.append(PositionalRuntime(eng, _positional_cfg, _positional_provider))
         print(f"DEBUG: Positional trading engines enabled (parallel): {[e.strategy_name for e in positional_engines]}")
     else:
         eng = PositionalTradingEngine(
@@ -68,7 +83,7 @@ if _positional_cfg.get("enabled", False):
             strategy_name=_positional_cfg.get("strategy", "condor"),
         )
         positional_engines.append(eng)
-        positional_runtime_wrappers.append(PositionalRuntime(eng, _positional_cfg))
+        positional_runtime_wrappers.append(PositionalRuntime(eng, _positional_cfg, _positional_provider))
         print("DEBUG: Positional trading engine enabled (single)")
 
 positional_engine = positional_engines[0] if positional_engines else None
@@ -302,6 +317,33 @@ def get_positional_status_all() -> dict:
             for eng in positional_engines
         },
     }
+
+@app.post("/api/positional/trigger")
+async def trigger_positional(x_trigger_key: Optional[str] = Header(default=None)) -> dict:
+    """Manually force one weekly-positional (options) analysis pass per
+    configured engine, bypassing the market-hours guard. Meant for manual
+    verification (e.g. confirming the Upstox data provider actually resolves
+    spot/chain/premiums) instead of waiting on the in-process 5-minute loop.
+    Sends the same Telegram alerts as the automatic run on any entry/exit.
+    Requires TRIGGER_API_KEY env var to match the X-Trigger-Key header --
+    same gating as /api/positional_stocks/trigger, see that endpoint's
+    docstring for why (real-money-adjacent via live_trading)."""
+    expected_key = os.getenv("TRIGGER_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="TRIGGER_API_KEY not configured on server")
+    if x_trigger_key != expected_key:
+        raise HTTPException(status_code=403, detail="invalid or missing X-Trigger-Key header")
+    if not positional_runtime_wrappers:
+        raise HTTPException(status_code=503, detail="positional_risk not enabled in config")
+    for wrapper in positional_runtime_wrappers:
+        await wrapper.check_once_per_day(runtime, force=True)
+    return {
+        "ran": True,
+        "strategies": [eng.strategy_name for eng in positional_engines],
+        "data_source": _positional_data_source,
+        "forced": True,
+    }
+
 
 @app.get("/api/positional_stocks/status")
 def get_positional_stocks_status() -> dict:

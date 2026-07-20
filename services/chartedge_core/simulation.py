@@ -309,12 +309,12 @@ class MarketSimulator:
                 if not is_blocked and self._is_rate_limited(symbol, fo_signal.strategy_name, candle.time):
                     is_blocked = True
                 if not is_blocked:
-                    # Silence signals during seeding (initial startup) to avoid dashboard spam.
-                    # But allow them if we are explicitly in backtesting mode.
+                    # Backfill/reconnect catch-up replays candles that are minutes to days old.
+                    # Entering trades off a stale candle re-fires historical signals for real —
+                    # block anything older than 5 min unless explicitly backtesting.
                     if not self.is_backtesting and (datetime.now(IST) - candle.time).total_seconds() > 300:
-                        # Ignore holds and check strategy-specific rate limits
-                        pass
-                    if fo_signal.signal != Direction.HOLD and not self._is_rate_limited(symbol, fo_signal.strategy_name, candle.time):
+                        is_blocked = True
+                if not is_blocked and fo_signal.signal != Direction.HOLD and not self._is_rate_limited(symbol, fo_signal.strategy_name, candle.time):
                         self.last_signal_times[(symbol, fo_signal.strategy_name)] = candle.time
                         
                         is_futures = "_FUT" in fo_signal.strategy_name or symbol == "NIFTY_FUT"

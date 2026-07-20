@@ -228,11 +228,31 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(900)
         asyncio.create_task(positional_stocks_smallcap_loop())
 
-    # NOTE: the daily Upstox WhatsApp/app approval push is event-driven, not
-    # a blind daily auto-fire -- positional_stocks_runtime._maybe_request_token()
-    # fires it (deduped per day) from inside a pool's analysis run, only at
-    # the moment a live-qualifying BUY/SELL is actually found. No signal that
-    # day -> no approval ask at all. See upstox_broker.maybe_request_token().
+    # Fire the daily Upstox WhatsApp/app approval push once at boot, instead
+    # of waiting for the first live-qualifying signal. VPS starts ~9:00 IST,
+    # 15 min before market open at 9:15 -- this asks for approval right away
+    # so it's not blocked on the timing of the first signal (which could be
+    # anytime during the day, or never, if left event-driven only).
+    # maybe_request_token() still dedupes per day, so this doesn't double-fire
+    # if a signal check later in the day would have asked too.
+    if _live_trading_cfg.get("enabled", False):
+        async def boot_token_request():
+            from services.chartedge_core.upstox_broker import live_broker, maybe_request_token
+            from services.chartedge_core.telegram import notifier
+            broker = live_broker()
+            if broker.get_valid_token() is not None:
+                return
+            res = maybe_request_token()
+            if res is None:
+                return
+            if res.get("ok"):
+                await notifier.send_message(
+                    "🔐 [UPSTOX] Daily token approval requested on startup -- "
+                    "approve the WhatsApp/app push now to enable live trading today."
+                )
+            else:
+                await notifier.send_message(f"⚠️ [UPSTOX] boot token request failed: {res.get('reason')}")
+        asyncio.create_task(boot_token_request())
 
     # Cleanup expired records daily (TTL: 30 days for positional trades, 180 days for stock positions)
     async def cleanup_loop():

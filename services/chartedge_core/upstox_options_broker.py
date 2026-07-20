@@ -178,9 +178,13 @@ class UpstoxOptionsBroker:
 
     def _unwind(self, token: str, placed: list[LegOrder], tag: str) -> list[str]:
         """Reverse already-placed legs after a mid-basket failure. Returns
-        list of legs that could NOT be unwound (needs manual action)."""
+        list of legs that could NOT be unwound (needs manual action).
+        
+        Iterates in LIFO (reversed) order: if we placed BUY wings first then
+        SELL shorts, unwinding in reverse order buys back the shorts first
+        before selling the wings, preserving the never-naked safety gate."""
         failed: list[str] = []
-        for leg in placed:
+        for leg in reversed(placed):
             reverse = LegOrder(
                 instrument_key=leg.instrument_key,
                 transaction_type="SELL" if leg.transaction_type == "BUY" else "BUY",

@@ -120,9 +120,16 @@ class FuturesTradingEngine:
         self.consecutive_losses = 0
         self.cooldown_until: datetime | None = None
         self.apply_costs = True
-        
+        # True right after boot while stale/prior-day trades are recovered from DB —
+        # suppresses per-trade Telegram alerts until finish_startup_backfill() is called.
+        self.is_startup_backfill: bool = not is_backtesting
+
         if not is_backtesting:
             self.load_active_trades()
+
+    def finish_startup_backfill(self) -> None:
+        """Call once boot recovery + startup summary are done to resume live per-trade alerts."""
+        self.is_startup_backfill = False
 
     def load_active_trades(self) -> None:
         """Load open futures trades from the database to resume tracking after a restart."""
@@ -528,6 +535,8 @@ class FuturesTradingEngine:
     # ─────────────────────────── Notifications ────────────────────────────────
 
     async def _send_telegram_entry(self, trade: FuturesTrade) -> None:
+        if self.is_startup_backfill:
+            return
         try:
             from services.chartedge_core.telegram import notifier
             msg = (
@@ -544,6 +553,8 @@ class FuturesTradingEngine:
             pass
 
     async def _send_telegram_exit(self, trade: FuturesTrade) -> None:
+        if self.is_startup_backfill or trade.exit_reason == "EOD_SQUAREOFF":
+            return
         try:
             from services.chartedge_core.telegram import notifier
             emoji = "✅" if trade.pnl >= 0 else "❌"

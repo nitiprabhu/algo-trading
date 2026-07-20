@@ -38,8 +38,15 @@ class PaperTradingEngine:
         self.cooldown_until: datetime | None = None
         # (underlying, option_type) pairs that hit a hard max-loss today — block same-side re-entry
         self.blocked_directions: set[tuple[str, str]] = set()
+        # True right after boot while stale/prior-day trades are recovered from DB —
+        # suppresses per-trade Telegram alerts until finish_startup_backfill() is called.
+        self.is_startup_backfill: bool = not is_backtesting
         if not skip_db_load and not is_backtesting:
             self.load_active_trades()
+
+    def finish_startup_backfill(self) -> None:
+        """Call once boot recovery + startup summary are done to resume live per-trade alerts."""
+        self.is_startup_backfill = False
 
 
     def _dte_to_expiry(self, symbol: str, now: datetime) -> float:
@@ -533,37 +540,37 @@ class PaperTradingEngine:
             if trade.legs:
                 save_trade_legs_to_cache(str(trade.id), trade.legs)
 
-            # Send Telegram Alert asynchronously
-            
-            from services.chartedge_core.telegram import notifier
-            display_inst = trade.instrument
-            import re
-            from datetime import datetime
-            match = re.search(r'_(\d{2}[A-Z]{3}\d{2})', trade.instrument)
-            if match:
-                try:
-                    dt = datetime.strptime(match.group(1), "%d%b%y")
-                    display_inst = f"{trade.instrument} (Expiry: {dt.strftime('%d-%b-%Y')})"
-                except:
-                    pass
-                    
-            msg = (
-                f"🚀 *TRADE ENTERED*\n\n"
-                f"🌐 *Instrument:* `{display_inst}`\n"
-                f"📈 *Direction:* `{trade.direction.value}`\n"
-                f"💰 *Entry Price:* `₹{trade.entry_price:.2f}`\n"
-                f"📦 *Quantity:* `{trade.quantity}`\n"
-                f"🛡️ *Stop Loss:* `₹{trade.sl_price:.2f}`\n"
-                f"🎯 *Target 1:* `₹{trade.t1_price:.2f}`\n"
-                f"🎯 *Target 2:* `₹{trade.t2_price:.2f}`\n\n"
-            )
-            if trade.legs:
-                msg += "*⛓️ Leg Details:*\n"
-                for leg in trade.legs:
-                    msg += f"• *{leg.action.value}* `{leg.instrument}` @ `₹{leg.entry_price:.2f}` (Strike: {leg.strike})\n"
-                msg += "\n"
-            msg += f"🧠 *Reason:* {signal.reasoning or 'No reason provided.'}"
-            asyncio.create_task(notifier.send_message(msg))
+            # Send Telegram Alert asynchronously — skipped during startup DB backfill
+            if not self.is_startup_backfill:
+                from services.chartedge_core.telegram import notifier
+                display_inst = trade.instrument
+                import re
+                from datetime import datetime
+                match = re.search(r'_(\d{2}[A-Z]{3}\d{2})', trade.instrument)
+                if match:
+                    try:
+                        dt = datetime.strptime(match.group(1), "%d%b%y")
+                        display_inst = f"{trade.instrument} (Expiry: {dt.strftime('%d-%b-%Y')})"
+                    except:
+                        pass
+
+                msg = (
+                    f"🚀 *TRADE ENTERED*\n\n"
+                    f"🌐 *Instrument:* `{display_inst}`\n"
+                    f"📈 *Direction:* `{trade.direction.value}`\n"
+                    f"💰 *Entry Price:* `₹{trade.entry_price:.2f}`\n"
+                    f"📦 *Quantity:* `{trade.quantity}`\n"
+                    f"🛡️ *Stop Loss:* `₹{trade.sl_price:.2f}`\n"
+                    f"🎯 *Target 1:* `₹{trade.t1_price:.2f}`\n"
+                    f"🎯 *Target 2:* `₹{trade.t2_price:.2f}`\n\n"
+                )
+                if trade.legs:
+                    msg += "*⛓️ Leg Details:*\n"
+                    for leg in trade.legs:
+                        msg += f"• *{leg.action.value}* `{leg.instrument}` @ `₹{leg.entry_price:.2f}` (Strike: {leg.strike})\n"
+                    msg += "\n"
+                msg += f"🧠 *Reason:* {signal.reasoning or 'No reason provided.'}"
+                asyncio.create_task(notifier.send_message(msg))
         await asyncio.to_thread(training_logger.log_entry, trade, signal)
         return trade
 
@@ -1011,34 +1018,35 @@ class PaperTradingEngine:
             from services.chartedge_core.training_logger import log_realtime_trade_action
             log_realtime_trade_action(log_msg)
 
-            # Send Telegram Alert asynchronously
-            from services.chartedge_core.telegram import notifier
-            display_inst = trade.instrument
-            import re
-            from datetime import datetime
-            match = re.search(r'_(\d{2}[A-Z]{3}\d{2})', trade.instrument)
-            if match:
-                try:
-                    dt = datetime.strptime(match.group(1), "%d%b%y")
-                    display_inst = f"{trade.instrument} (Expiry: {dt.strftime('%d-%b-%Y')})"
-                except:
-                    pass
-                    
-            msg = (
-                f"🏁 *TRADE CLOSED*\n\n"
-                f"🌐 *Instrument:* `{display_inst}`\n"
-                f"📉 *Exit Price:* `₹{trade.exit_price:.2f}`\n"
-                f"🚪 *Exit Reason:* `{trade.exit_reason}`\n"
-                f"{emoji} *PnL:* `₹{trade.pnl:.2f}` ({trade.pnl_pct:.2f}%)\n\n"
-            )
-            if trade.legs:
-                msg += "*⛓️ Leg Details:*\n"
-                for leg in trade.legs:
-                    exit_price_str = f"₹{leg.exit_price:.2f}" if leg.exit_price is not None else "N/A"
-                    msg += f"• *{leg.action.value}* `{leg.instrument}` (Entry: `₹{leg.entry_price:.2f}`, Exit: `{exit_price_str}`)\n"
-                msg += "\n"
-            msg += f"💵 *Invested Amount:* `₹{trade.invested_amount:.2f}`"
-            asyncio.create_task(notifier.send_message(msg))
+            # Send Telegram Alert asynchronously — skipped during startup DB backfill and forced EOD squareoffs
+            if not self.is_startup_backfill and reason != "EOD_SQUAREOFF":
+                from services.chartedge_core.telegram import notifier
+                display_inst = trade.instrument
+                import re
+                from datetime import datetime
+                match = re.search(r'_(\d{2}[A-Z]{3}\d{2})', trade.instrument)
+                if match:
+                    try:
+                        dt = datetime.strptime(match.group(1), "%d%b%y")
+                        display_inst = f"{trade.instrument} (Expiry: {dt.strftime('%d-%b-%Y')})"
+                    except:
+                        pass
+
+                msg = (
+                    f"🏁 *TRADE CLOSED*\n\n"
+                    f"🌐 *Instrument:* `{display_inst}`\n"
+                    f"📉 *Exit Price:* `₹{trade.exit_price:.2f}`\n"
+                    f"🚪 *Exit Reason:* `{trade.exit_reason}`\n"
+                    f"{emoji} *PnL:* `₹{trade.pnl:.2f}` ({trade.pnl_pct:.2f}%)\n\n"
+                )
+                if trade.legs:
+                    msg += "*⛓️ Leg Details:*\n"
+                    for leg in trade.legs:
+                        exit_price_str = f"₹{leg.exit_price:.2f}" if leg.exit_price is not None else "N/A"
+                        msg += f"• *{leg.action.value}* `{leg.instrument}` (Entry: `₹{leg.entry_price:.2f}`, Exit: `{exit_price_str}`)\n"
+                    msg += "\n"
+                msg += f"💵 *Invested Amount:* `₹{trade.invested_amount:.2f}`"
+                asyncio.create_task(notifier.send_message(msg))
         await asyncio.to_thread(training_logger.log_exit, trade)
 
     def _underlying_side(self, instrument: str) -> tuple[str, str | None]:

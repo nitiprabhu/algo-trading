@@ -177,6 +177,15 @@ async def lifespan(app: FastAPI):
     from services.chartedge_core.telegram import notifier
     asyncio.create_task(notifier.start_listening(runtime))
 
+    # One consolidated summary of trades recovered from the DB, then resume live per-trade alerts
+    async def startup_summary():
+        await notifier.send_startup_summary(runtime)
+        if hasattr(runtime, "trader"):
+            runtime.trader.finish_startup_backfill()
+        if hasattr(runtime, "futures_trader"):
+            runtime.futures_trader.finish_startup_backfill()
+    asyncio.create_task(startup_summary())
+
     # Background config sync in a thread to avoid blocking the event loop
     if os.getenv("DATABASE_URL"):
         async def background_sync():

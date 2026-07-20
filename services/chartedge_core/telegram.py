@@ -264,6 +264,50 @@ class TelegramNotifier:
                     trade.pnl = round((current_price - trade.entry_price) * direction_mult * trade.quantity, 2)
                     trade.pnl_pct = round(trade.pnl / trade.invested_amount * 100, 2) if trade.invested_amount > 0 else 0.0
 
+    async def send_startup_summary(self, runtime) -> None:
+        """Send one consolidated summary of all open positions recovered from the DB at boot."""
+        self._recalculate_open_positions_pnl(runtime)
+
+        opt_positions = list(runtime.trader.open_positions.values()) if hasattr(runtime, "trader") else []
+        fut_positions = list(runtime.futures_trader.open_positions.values()) if hasattr(runtime, "futures_trader") else []
+        all_positions = opt_positions + fut_positions
+
+        if not all_positions:
+            await self.send_message("📊 *PORTFOLIO SUMMARY (Startup)*\n\nNo open positions. Starting fresh.")
+            return
+
+        import re
+        from datetime import datetime as _dt
+
+        total_invested = 0.0
+        total_pnl = 0.0
+        lines = []
+        for trade in all_positions:
+            display_inst = trade.instrument
+            match = re.search(r'_(\d{2}[A-Z]{3}\d{2})', trade.instrument)
+            if match:
+                try:
+                    dt = _dt.strptime(match.group(1), "%d%b%y")
+                    display_inst = f"{trade.instrument} (Expiry: {dt.strftime('%d-%b-%Y')})"
+                except Exception:
+                    pass
+
+            total_invested += trade.invested_amount or 0.0
+            total_pnl += trade.pnl or 0.0
+            pnl_emoji = "🟢" if trade.pnl >= 0 else "🔴"
+            lines.append(
+                f"- `{display_inst}`: {pnl_emoji} ₹{trade.pnl:,.1f} ({trade.pnl_pct:+.2f}%)"
+            )
+
+        msg = (
+            f"📊 *PORTFOLIO SUMMARY (Startup)*\n\n"
+            f"*Open Positions:* {len(all_positions)}\n"
+            + "\n".join(lines)
+            + f"\n\n*Total Invested:* ₹{total_invested:,.1f}\n"
+            f"*Current MTM:* {'🟢' if total_pnl >= 0 else '🔴'} ₹{total_pnl:,.1f}"
+        )
+        await self.send_message(msg)
+
     async def _handle_command(self, command: str, runtime) -> None:
         self._recalculate_open_positions_pnl(runtime)
         if command in ("/start", "/help"):

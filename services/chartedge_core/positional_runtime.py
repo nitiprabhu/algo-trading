@@ -52,9 +52,12 @@ class PositionalRuntime:
             chain = await self.provider.get_option_chain(spot, "NIFTY", range_strikes=15, current_dt=now)
             premiums = await self.provider.get_leg_premiums(chain, legs)
             if premiums:
+                open_legs = self.engine.open_trade.legs
+                open_qty = self.engine.open_trade.quantity
                 trade = self.engine.mark_to_market(today, premiums)
                 if trade:
-                    await self._notify_exit(trade)
+                    live_note = self._execute_live(open_legs, open_qty, chain, entry=False)
+                    await self._notify_exit(trade, live_note)
         else:
             chain = await self.provider.get_option_chain(
                 spot, "NIFTY", range_strikes=15, current_dt=now,
@@ -75,9 +78,50 @@ class PositionalRuntime:
             if premiums:
                 trade = self.engine.maybe_enter(today, spot, vix, premiums, target_expiry=target_expiry, trend_pct=trend_pct)
                 if trade:
-                    await self._notify_entry(trade)
+                    live_note = self._execute_live(trade.legs, trade.quantity, chain, entry=True)
+                    await self._notify_entry(trade, live_note)
 
         self._last_check_date = today
+
+    def _execute_live(self, legs, quantity: int, chain: list[dict], entry: bool) -> str:
+        """Mirror the paper decision as a real Upstox basket order, gated by
+        positional_risk.live_trading (enabled+dry_run, common-pool margin
+        check -- see upstox_options_broker.py). Paper record is the source
+        of truth either way; this returns a one-line status for the Telegram
+        alert instead of raising. Instrument keys come from the option-chain
+        rows already fetched this cycle (Upstox pre-annotates ce/pe tokens)."""
+        live_cfg = self.config.get("live_trading") or {}
+        if not live_cfg.get("enabled", False):
+            return ""
+        try:
+            from services.chartedge_core.upstox_options_broker import LegOrder, options_broker
+            key_by_strike: dict[float, dict[str, str]] = {}
+            for row in chain:
+                key_by_strike[row.get("strike")] = {
+                    "CE": row.get("ce_token", ""), "PE": row.get("pe_token", ""),
+                }
+            leg_orders = []
+            for leg in legs:
+                ikey = key_by_strike.get(leg.strike, {}).get(leg.option_type, "")
+                if not ikey:
+                    return (f"⚠️ live skipped: no instrument key for "
+                            f"{leg.option_type} {leg.strike:.0f} in chain")
+                leg_orders.append(LegOrder(
+                    instrument_key=ikey,
+                    # entry: SHORT leg = SELL, LONG leg = BUY; exit reverses via close_basket
+                    transaction_type="SELL" if leg.side == "SHORT" else "BUY",
+                    quantity=quantity,
+                    label=f"{leg.side} {leg.option_type} {leg.strike:.0f}",
+                ))
+            broker = options_broker(live_cfg)
+            tag = "POS_CONDOR" if entry else "POS_CONDOR-EXIT"
+            result = broker.place_basket(leg_orders, tag) if entry else broker.close_basket(leg_orders, tag)
+            prefix = "🧪 DRY" if result.simulated else ("🟢 LIVE" if result.ok else "🔴 LIVE FAILED")
+            print(f"[Positional/{'ENTRY' if entry else 'EXIT'}] {prefix}: {result.summary()}")
+            return f"{prefix}: {result.summary()}"
+        except Exception as e:
+            print(f"⚠️ [Positional] live execution error: {e}")
+            return f"🔴 live execution error: {e}"
 
     def _legs_for(self, spot, vix, today, target_expiry, trend_pct):
         dte = max((target_expiry - today).days, 1) if target_expiry else 6
@@ -90,7 +134,7 @@ class PositionalRuntime:
         old, new = candles[-lookback - 1].close, candles[-1].close
         return (new - old) / old * 100.0 if old else 0.0
 
-    async def _notify_entry(self, trade) -> None:
+    async def _notify_entry(self, trade, live_note: str = "") -> None:
         from services.chartedge_core.telegram import notifier
         legs_str = " | ".join(f"{leg.side[0]}{leg.option_type}{leg.strike:.0f}" for leg in trade.legs)
         msg = (
@@ -100,9 +144,11 @@ class PositionalRuntime:
             f"🎯 Legs: {legs_str}\n"
             f"💰 Credit: `₹{trade.credit:.2f}` x {trade.quantity}"
         )
+        if live_note:
+            msg += f"\n🏦 Broker: {live_note}"
         await notifier.send_message(msg)
 
-    async def _notify_exit(self, trade) -> None:
+    async def _notify_exit(self, trade, live_note: str = "") -> None:
         from services.chartedge_core.telegram import notifier
         emoji = "✅" if trade.pnl >= 0 else "❌"
         msg = (
@@ -111,4 +157,6 @@ class PositionalRuntime:
             f"💰 Credit: `₹{trade.credit:.2f}` → Debit: `₹{trade.debit:.2f}`\n"
             f"📈 PnL: `₹{trade.pnl:+.2f}`"
         )
+        if live_note:
+            msg += f"\n🏦 Broker: {live_note}"
         await notifier.send_message(msg)

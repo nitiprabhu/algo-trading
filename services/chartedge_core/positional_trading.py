@@ -205,7 +205,7 @@ class PositionalTradingEngine:
     Persists to PositionalTradeRecord table (30-day TTL after close).
     """
 
-    def __init__(self, capital: float = 100000.0, strategy_name: str = "condor"):
+    def __init__(self, capital: float = 100000.0, strategy_name: str = "condor", is_backtesting: bool = False):
         if strategy_name not in STRATEGIES:
             raise ValueError(f"Unknown positional strategy: {strategy_name!r}, expected one of {list(STRATEGIES)}")
         self.capital = capital
@@ -213,7 +213,12 @@ class PositionalTradingEngine:
         self.strategy = STRATEGIES[strategy_name]()
         self.open_trade: Optional[PositionalTrade] = None
         self.closed_trades: list[PositionalTrade] = []
-        self._load()
+        # Backtesting must never read or write the live prod DB -- an ad-hoc
+        # backtest script sharing DATABASE_URL with the live positional_risk
+        # condor would otherwise inject synthetic trades into the real table.
+        self.is_backtesting = is_backtesting
+        if not self.is_backtesting:
+            self._load()
 
     def _load(self) -> None:
         from services.chartedge_core.database import get_open_positional_trades, get_closed_positional_trades, create_db_and_tables
@@ -297,8 +302,9 @@ class PositionalTradingEngine:
             spot_at_entry=spot, vix_at_entry=vix, legs=legs, credit=round(credit, 2), quantity=LOT_SIZE,
         )
         self.open_trade = trade
-        from services.chartedge_core.database import persist_positional_entry
-        persist_positional_entry(trade)
+        if not self.is_backtesting:
+            from services.chartedge_core.database import persist_positional_entry
+            persist_positional_entry(trade)
         return trade
 
     def mark_to_market(self, today: date, chain_premiums: dict[float, dict[str, float]]) -> Optional[PositionalTrade]:
@@ -330,8 +336,9 @@ class PositionalTradingEngine:
         t.pnl = round((t.credit - debit) * t.quantity, 2)
         t.status = "CLOSED"
 
-        from services.chartedge_core.database import persist_positional_exit
-        persist_positional_exit(t.id, t.exit_date, t.debit, t.exit_reason, t.pnl)
+        if not self.is_backtesting:
+            from services.chartedge_core.database import persist_positional_exit
+            persist_positional_exit(t.id, t.exit_date, t.debit, t.exit_reason, t.pnl)
 
         self.closed_trades.append(t)
         self.open_trade = None

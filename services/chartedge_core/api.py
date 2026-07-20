@@ -177,13 +177,20 @@ async def lifespan(app: FastAPI):
     from services.chartedge_core.telegram import notifier
     asyncio.create_task(notifier.start_listening(runtime))
 
-    # One consolidated summary of trades recovered from the DB, then resume live per-trade alerts
+    # One consolidated summary of trades recovered from the DB, then resume live per-trade alerts.
+    # Bounded by a timeout and wrapped in try/finally so a stuck chat-ID resolution or a failed
+    # summary send can never leave is_startup_backfill stuck True forever (which would silently
+    # kill every live trade alert for the rest of the session).
     async def startup_summary():
-        await notifier.send_startup_summary(runtime)
-        if hasattr(runtime, "trader"):
-            runtime.trader.finish_startup_backfill()
-        if hasattr(runtime, "futures_trader"):
-            runtime.futures_trader.finish_startup_backfill()
+        try:
+            await asyncio.wait_for(notifier.send_startup_summary(runtime), timeout=15)
+        except Exception as e:
+            print(f"⚠️ Startup summary failed/timed out: {e}. Resuming live alerts anyway.")
+        finally:
+            if hasattr(runtime, "trader"):
+                runtime.trader.finish_startup_backfill()
+            if hasattr(runtime, "futures_trader"):
+                runtime.futures_trader.finish_startup_backfill()
     asyncio.create_task(startup_summary())
 
     # Background config sync in a thread to avoid blocking the event loop

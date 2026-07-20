@@ -171,6 +171,18 @@ positional_risk:
   stop_credit_mult: 1.1   # tighter stop for lower per-trade pain; see positional_trading.py comment
   short_sigma_mult: 0.85
   wing_sigma_mult: 1.30
+  live_trading:
+    # Real Upstox F&O basket orders mirroring the paper condor decisions --
+    # see upstox_options_broker.py. Own gates, independent of the stock
+    # pools' live_trading block: arming one never arms the other.
+    # Funds are COMMON-POOL with the stock pools: the broker queries live
+    # free balance + live basket margin from Upstox before every entry and
+    # skips the week if it doesn't fit (fail closed on any API error).
+    # 1yr backtest basis (run_1year_positional_backtest.py, Jul25-Jul26):
+    # condor +₹41.9k on ₹1L, max single loss -₹6.9k, max drawdown -₹12.4k.
+    enabled: true          # dry-run observation week first (orders logged, nothing placed)
+    dry_run: true          # flip to false ONLY after a clean dry-run week
+    max_margin: 100000.0   # hard cap on margin this module may consume from the common pool
 
 positional_stocks_risk:
   # Large-cap technical INVESTMENT -- long-only, daily-swing signals. Fully

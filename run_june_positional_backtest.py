@@ -46,7 +46,7 @@ dates = sorted(chain.keys())
 
 # Run all 3 strategies (in-memory backtest, no DB persistence)
 strategies = ["condor", "straddle", "credit_spread"]
-engines = {s: PositionalTradingEngine(capital=100000.0, strategy_name=s) for s in strategies}
+engines = {s: PositionalTradingEngine(capital=100000.0, strategy_name=s, is_backtesting=True) for s in strategies}
 
 for s in strategies:
     engines[s].closed_trades = []

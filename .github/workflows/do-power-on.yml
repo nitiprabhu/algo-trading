@@ -1,0 +1,20 @@
+name: Power On Droplet
+
+on:
+  schedule:
+    - cron: '30 3 * * 1-5'  # 3:30 AM UTC (9:00 AM IST), Mon-Fri
+
+jobs:
+  power_on:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Power on DigitalOcean Droplet
+        env:
+          DO_API_TOKEN: ${{ secrets.DO_API_TOKEN }}
+          DROPLET_ID: 586070363
+        run: |
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DO_API_TOKEN" \
+            -d '{"type":"power_on"}' \
+            https://api.digitalocean.com/v2/droplets/$DROPLET_ID/actions

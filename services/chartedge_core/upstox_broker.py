@@ -119,6 +119,30 @@ def maybe_request_token() -> Optional[dict[str, Any]]:
     return request_access_token()
 
 
+async def notify_token_needed(reason: str = "") -> None:
+    """Event-driven WhatsApp/app approval: fires only when actually needed
+    (no valid token exists) and only once per day (maybe_request_token
+    dedupes process-wide, so multiple callers -- positional-stocks pools,
+    the weekly-positional data provider -- in the same run don't each
+    trigger a separate push). No-op if a valid token already exists.
+    `reason` is included in the Telegram alert so it's clear what needed
+    the token (e.g. "largecap pool", "weekly positional data fetch")."""
+    broker = live_broker()
+    if broker.get_valid_token() is not None:
+        return
+    from services.chartedge_core.telegram import notifier
+    res = maybe_request_token()
+    if res is None:
+        return  # already asked today -- caller falls back to paper/skip, same as before
+    if res.get("ok"):
+        await notifier.send_message(
+            f"[UPSTOX] a live signal fired ({reason}) -- approve the WhatsApp/app request now "
+            "to execute it today. Miss the window and it stays paper-only for today."
+        )
+    else:
+        await notifier.send_message(f"⚠️ [UPSTOX] token request failed: {res.get('reason')}")
+
+
 TOKEN_FILE = Path(os.getenv("UPSTOX_TOKEN_FILE", "data/upstox_token.json"))
 
 # Product code for delivery (CNC-equivalent) -- positional swing = delivery,
@@ -325,7 +349,8 @@ class UpstoxBroker:
         """Server-side single-leg GTT stop-loss (SELL below trigger). Trigger
         = ref_price * (1 - gtt_stop_pct/100). Lives independent of our daemon
         and the daily token -- this is the forgot-token safety net."""
-        trigger = round(ref_price * (1 - self.gtt_stop_pct / 100), 2)
+        raw_trigger = ref_price * (1 - self.gtt_stop_pct / 100)
+        trigger = round(round(raw_trigger / 0.05) * 0.05, 2)
         body = {
             "type": "SINGLE",
             "quantity": int(quantity),

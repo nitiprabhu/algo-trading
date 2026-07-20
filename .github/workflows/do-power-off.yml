@@ -1,0 +1,20 @@
+name: Power Off Droplet
+
+on:
+  schedule:
+    - cron: '0 12 * * 1-5'  # 12:00 PM UTC (5:30 PM IST), Mon-Fri
+
+jobs:
+  power_off:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Power off DigitalOcean Droplet
+        env:
+          DO_API_TOKEN: ${{ secrets.DO_API_TOKEN }}
+          DROPLET_ID: 586070363
+        run: |
+          curl -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DO_API_TOKEN" \
+            -d '{"type":"power_off"}' \
+            https://api.digitalocean.com/v2/droplets/$DROPLET_ID/actions

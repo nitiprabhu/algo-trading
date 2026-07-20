@@ -187,24 +187,12 @@ class PositionalStocksRuntime:
 
     async def _maybe_request_token(self, broker) -> None:
         """Event-driven WhatsApp/app approval: only ask when there's actually
-        something to execute live and no valid token exists yet. No blind
-        daily nag on no-signal days. Deduped process-wide (see
-        upstox_broker.maybe_request_token) so multiple pools finding signals
-        in the same run don't spam separate pushes."""
-        if broker.get_valid_token() is not None:
-            return
-        from services.chartedge_core.upstox_broker import maybe_request_token
-        from services.chartedge_core.telegram import notifier
-        res = maybe_request_token()
-        if res is None:
-            return  # already asked today -- this order will paper-fallback, same as before
-        if res.get("ok"):
-            await notifier.send_message(
-                "[UPSTOX] a live signal fired -- approve the WhatsApp/app request now "
-                "to execute it today. Miss the window and it stays paper-only for today."
-            )
-        else:
-            await notifier.send_message(f"⚠️ [UPSTOX] token request failed: {res.get('reason')}")
+        something to execute live and no valid token exists yet. Delegates to
+        the shared upstox_broker.notify_token_needed(), which also backs the
+        weekly-positional Upstox data provider -- one implementation, one
+        Telegram message format, deduped process-wide either way."""
+        from services.chartedge_core.upstox_broker import notify_token_needed
+        await notify_token_needed(reason=f"{self.engine.pool} pool")
 
     async def _live_entry(self, position, ref_price: float) -> None:
         """Fire a live Upstox BUY + protective GTT stop for a fresh entry.

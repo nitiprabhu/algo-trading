@@ -349,7 +349,8 @@ class UpstoxBroker:
         """Server-side single-leg GTT stop-loss (SELL below trigger). Trigger
         = ref_price * (1 - gtt_stop_pct/100). Lives independent of our daemon
         and the daily token -- this is the forgot-token safety net."""
-        trigger = round(ref_price * (1 - self.gtt_stop_pct / 100), 2)
+        raw_trigger = ref_price * (1 - self.gtt_stop_pct / 100)
+        trigger = round(round(raw_trigger / 0.05) * 0.05, 2)
         body = {
             "type": "SINGLE",
             "quantity": int(quantity),

@@ -2,7 +2,7 @@ name: Power Off Droplet
 
 on:
   schedule:
-    - cron: '0 12 * * 1-5'  # 12:00 PM UTC (5:30 PM IST), Mon-Fri
+    - cron: '0 11 * * 1-5'  # 11:00 AM UTC (4:30 PM IST), Mon-Fri
 
 jobs:
   power_off:

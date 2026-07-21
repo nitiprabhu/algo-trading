@@ -1,0 +1,7 @@
+# Install: cp to /etc/systemd/system/notify-service-failure.service
+[Unit]
+Description=Telegram alert on algo-trading.service failure
+
+[Service]
+Type=oneshot
+ExecStart=/opt/algo-trading/deploy/notify_service_failure.sh

@@ -199,7 +199,7 @@ class PositionalStocksRuntime:
         No-op unless live_trading is armed; on dry_run it just logs. Never
         raises -- the paper record is already committed, so a broker failure
         must not roll that back; it only alerts."""
-        from services.chartedge_core.upstox_broker import live_broker
+        from services.chartedge_core.upstox_broker import live_broker, log_order_event
         from services.chartedge_core.telegram import notifier
         broker = live_broker()
         if not broker.enabled:
@@ -207,6 +207,7 @@ class PositionalStocksRuntime:
         if not broker.dry_run:
             await self._maybe_request_token(broker)
         res = broker.place_entry(position.symbol, position.quantity, ref_price, self._live_tag())
+        log_order_event("BUY", position.symbol, res)
         mode = "SIM" if res.simulated else "LIVE"
         if res.ok:
             await notifier.send_message(
@@ -223,7 +224,7 @@ class PositionalStocksRuntime:
         """Fire a live Upstox SELL to close a live position on an engine exit.
         If no valid token, the sell is skipped and the position's server-side
         GTT stop remains the protective floor -- surfaced via alert."""
-        from services.chartedge_core.upstox_broker import live_broker
+        from services.chartedge_core.upstox_broker import live_broker, log_order_event
         from services.chartedge_core.telegram import notifier
         broker = live_broker()
         if not broker.enabled:
@@ -231,6 +232,7 @@ class PositionalStocksRuntime:
         if not broker.dry_run:
             await self._maybe_request_token(broker)
         res = broker.place_exit(position.symbol, position.quantity, self._live_tag())
+        log_order_event("SELL", position.symbol, res)
         mode = "SIM" if res.simulated else "LIVE"
         if res.ok:
             await notifier.send_message(

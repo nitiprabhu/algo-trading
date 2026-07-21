@@ -314,6 +314,51 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(86400)  # daily
     asyncio.create_task(cleanup_loop())
 
+    # Feed-health watchdog: alert once if the feed is still WARMING (never
+    # reached live) well after startup, instead of silently sitting there.
+    async def feed_health_watchdog():
+        from services.chartedge_core.telegram import notifier
+        await asyncio.sleep(15 * 60)  # grace period for normal warmup
+        if runtime.feed_health != "OK":
+            await notifier.send_message(
+                f"⚠️ [FEED] health still '{runtime.feed_health}' 15min after startup -- "
+                "signals/prices may be stale or absent."
+            )
+    asyncio.create_task(feed_health_watchdog())
+
+    # Daily P&L digest at market close (15:35 IST) across all active pools.
+    async def daily_digest_loop():
+        from services.chartedge_core.telegram import notifier
+        last_sent_date = None
+        while True:
+            await asyncio.sleep(300)
+            now_ist = datetime.now(IST)
+            if now_ist.hour == 15 and now_ist.minute >= 35:
+                today = now_ist.strftime("%Y-%m-%d")
+                if last_sent_date == today:
+                    continue
+                last_sent_date = today
+                lines = [f"📊 [EOD DIGEST] {today}"]
+                for eng in positional_engines:
+                    m = eng.metrics()
+                    lines.append(
+                        f"{eng.strategy_name}: net P&L ₹{m.get('net_pnl', 0):,.0f} "
+                        f"({m.get('cycles', 0)} cycles, {m.get('win_pct', 0):.0f}% win)"
+                    )
+                for label, eng in (
+                    ("Stocks (largecap)", positional_stocks_engine),
+                    ("Stocks (midcap)", positional_stocks_midcap_engine),
+                    ("Stocks (smallcap)", positional_stocks_smallcap_engine),
+                ):
+                    if eng is None:
+                        continue
+                    m = eng.metrics()
+                    lines.append(
+                        f"{label}: {m.get('open_count', 0)} open, net P&L ₹{m.get('net_pnl', 0):,.0f}"
+                    )
+                await notifier.send_message("\n".join(lines))
+    asyncio.create_task(daily_digest_loop())
+
     yield
 
 app = FastAPI(title="ChartEdge AI", version="0.1.0", lifespan=lifespan)

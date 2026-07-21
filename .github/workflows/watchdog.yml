@@ -1,0 +1,56 @@
+name: Watchdog
+
+# External monitor GH Actions can run even if the droplet itself is down or
+# hung. Checks: (1) the 3 scheduled trading workflows haven't silently been
+# disabled (happened 2026-07-20, caught only because it was asked about
+# manually), (2) /health responds during market hours. Alerts via Telegram --
+# requires TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID repo secrets (not set by
+# default; see deploy/README.md).
+on:
+  schedule:
+    - cron: "*/30 4-10 * * 1-5"  # every 30min, 9:30AM-3:30PM IST, Mon-Fri
+  workflow_dispatch: {}
+
+jobs:
+  check_workflows_enabled:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check scheduled workflows are enabled
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          for wf in positional-stocks-trigger.yml do-power-on.yml do-power-off.yml; do
+            state=$(gh api "repos/${{ github.repository }}/actions/workflows/${wf}" --jq '.state')
+            echo "$wf: $state"
+            if [ "$state" != "active" ]; then
+              if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d chat_id="${TELEGRAM_CHAT_ID}" \
+                  -d text="⚠️ [WATCHDOG] GitHub workflow ${wf} is '${state}', not active -- it will not fire." \
+                  > /dev/null
+              fi
+            fi
+          done
+
+  check_health_endpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /health
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CHARTEDGE_API_HOST: ${{ vars.CHARTEDGE_API_HOST }}
+        run: |
+          if [ -z "$CHARTEDGE_API_HOST" ]; then
+            echo "CHARTEDGE_API_HOST var not set, skipping"; exit 0
+          fi
+          code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 "${CHARTEDGE_API_HOST}/health" || echo "000")
+          echo "health check: HTTP $code"
+          if [ "$code" != "200" ] && [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="⚠️ [WATCHDOG] /health unreachable (HTTP ${code}) during market hours." \
+              > /dev/null
+          fi

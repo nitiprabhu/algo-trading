@@ -173,6 +173,25 @@ class OrderResult:
         }
 
 
+def log_order_event(kind: str, symbol: str, result: "OrderResult") -> None:
+    """Append every live order attempt (success or failure) to a local file,
+    independent of Telegram. Telegram delivery can fail silently (as it did
+    2026-07-21 on a Markdown parse error) and lose the only record of why an
+    order didn't fill -- this file is the fallback source of truth."""
+    try:
+        root = Path(__file__).resolve().parents[2]
+        log_path = root / "logs" / "order_events.jsonl"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.now(IST).isoformat(), "kind": kind, "symbol": symbol,
+            **result.to_dict(),
+        }
+        with open(log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        print(f"⚠️ Failed to write order_events.jsonl: {e}")
+
+
 class UpstoxBroker:
     """Thin, defensive wrapper over the Upstox order + GTT REST endpoints.
 

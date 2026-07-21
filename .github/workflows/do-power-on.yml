@@ -13,9 +13,23 @@ jobs:
         env:
           DO_API_TOKEN: ${{ secrets.DO_API_TOKEN }}
           DROPLET_ID: 586070363
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          curl -X POST \
+          resp=$(curl -sS -w "\n%{http_code}" -X POST \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $DO_API_TOKEN" \
             -d '{"type":"power_on"}' \
-            https://api.digitalocean.com/v2/droplets/$DROPLET_ID/actions
+            https://api.digitalocean.com/v2/droplets/$DROPLET_ID/actions)
+          code=$(echo "$resp" | tail -n1)
+          body=$(echo "$resp" | sed '$d')
+          echo "HTTP $code"; echo "$body"
+          if [ "$code" -ge 300 ]; then
+            if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${TELEGRAM_CHAT_ID}" \
+                -d text="⚠️ [DO] power_on failed HTTP ${code} -- check DO_API_TOKEN. Droplet may not start; trading day at risk." \
+                > /dev/null
+            fi
+            echo "::error::power_on failed with HTTP $code"; exit 1
+          fi

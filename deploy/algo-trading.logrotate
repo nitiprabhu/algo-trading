@@ -1,0 +1,10 @@
+# Install: cp to /etc/logrotate.d/algo-trading
+/var/log/algo-trading.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}

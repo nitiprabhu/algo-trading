@@ -41,7 +41,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CHARTEDGE_API_HOST: ${{ vars.CHARTEDGE_API_HOST }}
+          CHARTEDGE_API_HOST: ${{ secrets.CHARTEDGE_API_HOST }}
         run: |
           if [ -z "$CHARTEDGE_API_HOST" ]; then
             echo "CHARTEDGE_API_HOST var not set, skipping"; exit 0

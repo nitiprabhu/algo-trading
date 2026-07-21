@@ -3,6 +3,7 @@ name: Power On Droplet
 on:
   schedule:
     - cron: '30 3 * * 1-5'  # 3:30 AM UTC (9:00 AM IST), Mon-Fri
+  workflow_dispatch: {}
 
 jobs:
   power_on:

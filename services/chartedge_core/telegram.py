@@ -2,6 +2,7 @@ import os
 import json
 import urllib.request
 import urllib.parse
+import urllib.error
 import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -102,21 +103,31 @@ class TelegramNotifier:
             return False
 
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        payload = {
-            "chat_id": self._chat_id,
-            "text": text,
-            "parse_mode": "Markdown"
-        }
-        
-        try:
-            def post():
-                data = urllib.parse.urlencode(payload).encode("utf-8")
-                req = urllib.request.Request(url, data=data, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    return response.read()
 
-            await asyncio.to_thread(post)
+        def post(payload):
+            data = urllib.parse.urlencode(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.read()
+
+        try:
+            await asyncio.to_thread(
+                post, {"chat_id": self._chat_id, "text": text, "parse_mode": "Markdown"}
+            )
             return True
+        except urllib.error.HTTPError as e:
+            if e.code == 400:
+                # Markdown parse errors (stray _/* in symbol/tag text) must not
+                # swallow the alert -- retry once as plain text so live-order
+                # fill/fail results always reach Telegram.
+                try:
+                    await asyncio.to_thread(post, {"chat_id": self._chat_id, "text": text})
+                    return True
+                except Exception as e2:
+                    print(f"Error sending message to Telegram (plain-text retry): {e2}")
+                    return False
+            print(f"Error sending message to Telegram: {e}")
+            return False
         except Exception as e:
             print(f"Error sending message to Telegram: {e}")
             return False

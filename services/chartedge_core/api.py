@@ -171,7 +171,13 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Run sync and run loop in background
-    asyncio.create_task(runtime.run())
+    # INTRADAY_ENABLED=false parks the intraday NIFTY/BANKNIFTY signal loop (and its
+    # data source, indstocks/mock) while weekly options + positional stocks keep running.
+    intraday_enabled = os.getenv("INTRADAY_ENABLED", "true").lower() != "false"
+    if intraday_enabled:
+        asyncio.create_task(runtime.run())
+    else:
+        print("DEBUG: INTRADAY_ENABLED=false -- skipping intraday runtime.run() loop")
 
     # Start Telegram Command Listener on startup
     from services.chartedge_core.telegram import notifier

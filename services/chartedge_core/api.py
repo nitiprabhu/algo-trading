@@ -276,6 +276,34 @@ async def lifespan(app: FastAPI):
                 await notifier.send_message(f"⚠️ [UPSTOX] boot token request failed: {res.get('reason')}")
         asyncio.create_task(boot_token_request())
 
+        # Periodic re-check during market hours: boot_token_request only catches a
+        # missing token at startup. If the token goes bad mid-session (revoked,
+        # invalidated -- as happened 2026-07-21, Upstox 401s appeared hours after a
+        # valid boot-time token), nothing re-asks for approval until the next
+        # restart. This loop re-checks every 2h from 9:00-16:00 IST and re-fires the
+        # approval push directly (bypassing maybe_request_token's once-a-day dedupe,
+        # which would otherwise block a retry since boot already used it up).
+        async def periodic_token_recheck():
+            from services.chartedge_core.upstox_broker import live_broker, request_access_token
+            from services.chartedge_core.telegram import notifier
+            while True:
+                await asyncio.sleep(2 * 60 * 60)
+                now_ist = datetime.now(IST)
+                if not (9 <= now_ist.hour < 16):
+                    continue
+                broker = live_broker()
+                if broker.get_valid_token() is not None:
+                    continue
+                res = request_access_token()
+                if res.get("ok"):
+                    await notifier.send_message(
+                        "🔐 [UPSTOX] Token invalid mid-session -- re-requested approval. "
+                        "Approve the WhatsApp/app push now to resume live trading today."
+                    )
+                else:
+                    await notifier.send_message(f"⚠️ [UPSTOX] mid-session token re-request failed: {res.get('reason')}")
+        asyncio.create_task(periodic_token_recheck())
+
     # Cleanup expired records daily (TTL: 30 days for positional trades, 180 days for stock positions)
     async def cleanup_loop():
         while True:

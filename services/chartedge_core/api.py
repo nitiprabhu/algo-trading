@@ -280,14 +280,14 @@ async def lifespan(app: FastAPI):
         # missing token at startup. If the token goes bad mid-session (revoked,
         # invalidated -- as happened 2026-07-21, Upstox 401s appeared hours after a
         # valid boot-time token), nothing re-asks for approval until the next
-        # restart. This loop re-checks every 2h from 9:00-16:00 IST and re-fires the
+        # restart. This loop re-checks every 1h from 9:00-16:00 IST and re-fires the
         # approval push directly (bypassing maybe_request_token's once-a-day dedupe,
         # which would otherwise block a retry since boot already used it up).
         async def periodic_token_recheck():
             from services.chartedge_core.upstox_broker import live_broker, request_access_token
             from services.chartedge_core.telegram import notifier
             while True:
-                await asyncio.sleep(2 * 60 * 60)
+                await asyncio.sleep(60 * 60)
                 now_ist = datetime.now(IST)
                 if not (9 <= now_ist.hour < 16):
                     continue

@@ -59,6 +59,8 @@ ORDER_DETAILS_PATH = "/order/details"
 # the path differs for your app. Must be confirmed before live use.
 UPSTOX_GTT_BASE = os.getenv("UPSTOX_GTT_BASE", "https://api.upstox.com/v3")
 PLACE_GTT_PATH = "/order/gtt/place"
+GTT_LIST_PATH = "/order/gtt"
+GTT_CANCEL_PATH = "/order/gtt/cancel"
 
 # Sandbox (safe test env, real API + fake fills, no money). Token is 30-day,
 # generated from the Upstox developer console -- does NOT follow the daily
@@ -388,6 +390,37 @@ class UpstoxBroker:
             raise RuntimeError(f"GTT HTTP {resp.status_code}: {resp.text[:200]}")
         data = resp.json().get("data", {})
         return data.get("gtt_order_id") or data.get("gtt_order_ids", [None])[0]
+
+    # --- GTT book: list + cancel (reconciliation job) ----------------------
+    def list_gtt(self, token: str) -> list[dict[str, Any]]:
+        """All GTT orders on the account, any status. Returns [] on any
+        HTTP/parse failure -- caller (reconciliation) then just skips GTT
+        cleanup for this run rather than guessing."""
+        try:
+            resp = requests.get(f"{self._gtt_base}{GTT_LIST_PATH}",
+                                headers=self._headers(token), timeout=15)
+            if resp.status_code != 200:
+                print(f"[UpstoxBroker] GTT list HTTP {resp.status_code}: {resp.text[:200]}")
+                return []
+            return resp.json().get("data", []) or []
+        except Exception as e:
+            print(f"[UpstoxBroker] GTT list failed: {e}")
+            return []
+
+    def cancel_gtt(self, gtt_order_id: str, token: str) -> OrderResult:
+        """Cancel a single GTT order (e.g. an orphaned protective stop left
+        over after a BUY that never actually filled -- see
+        positional_stocks_runtime.reconcile_stock_positions). Never raises."""
+        try:
+            resp = requests.delete(f"{self._gtt_base}{GTT_CANCEL_PATH}",
+                                   headers=self._headers(token),
+                                   params={"gtt_order_id": gtt_order_id}, timeout=15)
+            if resp.status_code not in (200, 201):
+                return OrderResult(ok=False, simulated=False,
+                                   reason=f"GTT cancel HTTP {resp.status_code}: {resp.text[:200]}")
+            return OrderResult(ok=True, simulated=False, gtt_id=gtt_order_id, reason="GTT cancelled")
+        except Exception as e:
+            return OrderResult(ok=False, simulated=False, reason=f"GTT cancel exception: {e}")
 
     # --- exit: dynamic sell (engine-driven; token required) ---------------
     def place_exit(self, symbol: str, quantity: int, tag: str) -> OrderResult:

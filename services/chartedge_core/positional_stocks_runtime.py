@@ -371,12 +371,35 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
         if qty > 0 and symbol not in tracked_symbols
     )
 
-    if removed or untracked:
+    # Orphaned GTT stops: place_entry() fires the protective GTT right after
+    # the BUY appears to succeed, but a since-corrected (RECONCILED_NOT_FILLED)
+    # or never-fully-filled position leaves that SELL-side GTT alive at the
+    # broker with no real holding behind it -- clean those up so a dangling
+    # SCHEDULED order isn't sitting there indefinitely (harmless -- it'd just
+    # fail to execute -- but it's clutter and confusing to audit manually).
+    cancelled_gtt: list[str] = []
+    for g in broker.list_gtt(token):
+        if g.get("rules", [{}])[0].get("status") != "SCHEDULED":
+            continue
+        symbol = g.get("trading_symbol")
+        gtt_qty = int(g.get("quantity", 0) or 0)
+        if held_qty.get(symbol, 0) >= gtt_qty:
+            continue  # broker holding covers this GTT's sell quantity -- legit
+        gtt_id = g.get("gtt_order_id")
+        res = broker.cancel_gtt(gtt_id, token)
+        if res.ok:
+            cancelled_gtt.append(f"{symbol}({gtt_id})")
+        else:
+            print(f"⚠️ [Reconcile] GTT cancel failed for {symbol} {gtt_id}: {res.reason}")
+
+    if removed or untracked or cancelled_gtt:
         lines = ["[RECONCILE] Positional stocks vs Upstox holdings"]
         if removed:
             lines.append("Removed (never filled, DB corrected): " + ", ".join(removed))
         if untracked:
             lines.append("Held at broker but untracked by any pool (manual?): " + ", ".join(untracked))
+        if cancelled_gtt:
+            lines.append("Orphaned GTT stops cancelled: " + ", ".join(cancelled_gtt))
         await notifier.send_message("\n".join(lines))
 
-    return {"ran": True, "removed": removed, "untracked": untracked}
+    return {"ran": True, "removed": removed, "untracked": untracked, "cancelled_gtt": cancelled_gtt}

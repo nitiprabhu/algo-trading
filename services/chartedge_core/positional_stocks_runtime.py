@@ -85,6 +85,19 @@ class PositionalStocksRuntime:
             cutoff_h, cutoff_m = (int(x) for x in cutoff.split(":"))
             if now.time() < dtime(cutoff_h, cutoff_m):
                 return {"ran": False, "reason": "before_cutoff_time"}
+            # Upper bound: NSE closes 15:30 IST and place_entry() always sends
+            # is_amo=False, so any live BUY placed after close gets instantly
+            # rejected by the exchange (not queued) -- this bit us for real on
+            # 2026-07-22 when a service restart after close wiped the in-memory
+            # once-per-day guard and immediately re-fired past the (pre-close)
+            # cutoff. _last_check_date is only in-memory, so a restart any time
+            # after cutoff can retrigger this; capping the window here is
+            # cheaper and safer than making place_entry AMO-aware.
+            close_cutoff = self.config.get("market_close_time", "15:25")
+            close_h, close_m = (int(x) for x in close_cutoff.split(":"))
+            if now.time() >= dtime(close_h, close_m):
+                self._last_check_date = today  # don't retry today -- window's gone
+                return {"ran": False, "reason": "past_market_close_window"}
 
         entries: list[str] = []
         exits: list[str] = []

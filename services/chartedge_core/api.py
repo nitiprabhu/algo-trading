@@ -359,6 +359,41 @@ async def lifespan(app: FastAPI):
                 await notifier.send_message("\n".join(lines))
     asyncio.create_task(daily_digest_loop())
 
+    # Self-shutdown at day's end -- in-process, no external cron dependency.
+    # GitHub Actions' scheduled power-off/power-on crons are best-effort and
+    # single-shot daily triggers get silently dropped often enough that this
+    # was unreliable in practice (confirmed: zero schedule-triggered runs
+    # ever, only manual). Power-on can't self-trigger (box is off), but
+    # power-off can -- the box is already up at shutdown time, so it just
+    # halts itself. A clean OS shutdown is detected by DigitalOcean as a
+    # power-off (same end state as the dashboard button/API call), no
+    # DO_API_TOKEN needed. SELF_SHUTDOWN_TIME env var overrides the default;
+    # set to "off" to disable entirely.
+    async def self_shutdown_loop():
+        from services.chartedge_core.telegram import notifier
+        shutdown_time = os.getenv("SELF_SHUTDOWN_TIME", "17:00")
+        if shutdown_time.lower() == "off":
+            return
+        sh, sm = (int(x) for x in shutdown_time.split(":"))
+        last_triggered_date = None
+        while True:
+            await asyncio.sleep(300)
+            now_ist = datetime.now(IST)
+            if now_ist.time() < now_ist.time().replace(hour=sh, minute=sm):
+                continue
+            today = now_ist.strftime("%Y-%m-%d")
+            if last_triggered_date == today:
+                continue
+            last_triggered_date = today
+            await notifier.send_message(
+                f"🔌 [SELF-SHUTDOWN] Powering off droplet at {now_ist.strftime('%H:%M')} IST "
+                f"(SELF_SHUTDOWN_TIME={shutdown_time})."
+            )
+            await asyncio.sleep(3)  # let the Telegram send land before the box dies
+            proc = await asyncio.create_subprocess_exec("shutdown", "-h", "now")
+            await proc.wait()
+    asyncio.create_task(self_shutdown_loop())
+
     yield
 
 app = FastAPI(title="ChartEdge AI", version="0.1.0", lifespan=lifespan)

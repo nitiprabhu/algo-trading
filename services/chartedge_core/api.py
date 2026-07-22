@@ -377,7 +377,7 @@ async def lifespan(app: FastAPI):
         sh, sm = (int(x) for x in shutdown_time.split(":"))
         last_triggered_date = None
         while True:
-            await asyncio.sleep(300)
+            await asyncio.sleep(3600)
             now_ist = datetime.now(IST)
             if now_ist.time() < now_ist.time().replace(hour=sh, minute=sm):
                 continue

@@ -6,13 +6,14 @@ Run once next time the droplet is up:
 # 1. Log rotation
 sudo cp deploy/algo-trading.logrotate /etc/logrotate.d/algo-trading
 
-# 2. Crash alert
+# 2. Crash + stop/shutdown alerts
 sudo mkdir -p /etc/systemd/system/algo-trading.service.d
 sudo cp deploy/algo-trading-override.conf /etc/systemd/system/algo-trading.service.d/override.conf
 sudo cp deploy/notify-service-failure.service /etc/systemd/system/notify-service-failure.service
 sudo mkdir -p /opt/algo-trading/deploy
 sudo cp deploy/notify_service_failure.sh /opt/algo-trading/deploy/notify_service_failure.sh
-sudo chmod +x /opt/algo-trading/deploy/notify_service_failure.sh
+sudo cp deploy/notify_service_stop.sh /opt/algo-trading/deploy/notify_service_stop.sh
+sudo chmod +x /opt/algo-trading/deploy/notify_service_failure.sh /opt/algo-trading/deploy/notify_service_stop.sh
 sudo systemctl daemon-reload
 ```
 

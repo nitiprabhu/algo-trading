@@ -25,6 +25,7 @@ from services.chartedge_core.upstox_broker import UPSTOX_API_BASE
 LTP_PATH = "/market-quote/ltp"
 OPTION_CHAIN_PATH = "/option/chain"
 OPTION_CONTRACT_PATH = "/option/contract"
+HOLDINGS_PATH = "/portfolio/long-term-holdings"
 
 
 def _api_base(broker) -> str:
@@ -36,6 +37,27 @@ def _headers(token: str) -> dict[str, str]:
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
     }
+
+
+def fetch_holdings(broker, token: str) -> list[dict[str, Any]]:
+    """Actual CNC delivery holdings from Upstox -- the broker's real book,
+    independent of whatever the app's in-memory/DB position state says.
+    Used by the positional-stocks reconciliation job to correct DB drift
+    (e.g. a BUY that never actually filled -- funds/RMS block -- but got
+    committed to the paper record before the live order result came back).
+    Returns [] on any HTTP/parse failure, same convention as fetch_ltp."""
+    try:
+        resp = requests.get(
+            f"{_api_base(broker)}{HOLDINGS_PATH}",
+            headers=_headers(token), timeout=15,
+        )
+        if resp.status_code != 200:
+            print(f"⚠️ [Positional/Upstox] holdings HTTP {resp.status_code}: {resp.text[:200]}")
+            return []
+        return resp.json().get("data", []) or []
+    except Exception as e:
+        print(f"⚠️ [Positional/Upstox] holdings fetch failed: {e}")
+        return []
 
 
 def fetch_ltp(broker, token: str, instrument_key: str) -> Optional[float]:

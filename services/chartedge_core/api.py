@@ -549,6 +549,33 @@ async def trigger_positional_stocks_smallcap(x_trigger_key: Optional[str] = Head
     return result
 
 
+@app.post("/api/positional_stocks/reconcile")
+async def reconcile_positional_stocks(x_trigger_key: Optional[str] = Header(default=None)) -> dict:
+    """Post-close reconciliation: pull actual Upstox CNC holdings and correct
+    any pool's DB position that claims OPEN but never actually filled at the
+    broker (funds/RMS block, price band, etc.) -- see
+    positional_stocks_runtime.reconcile_stock_positions for why this drift
+    can happen. Meant to run once daily after market close (15:30 IST) via
+    an external scheduler. Same auth as /api/positional_stocks/trigger."""
+    expected_key = os.getenv("TRIGGER_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="TRIGGER_API_KEY not configured on server")
+    if x_trigger_key != expected_key:
+        raise HTTPException(status_code=403, detail="invalid or missing X-Trigger-Key header")
+    from services.chartedge_core.positional_stocks_runtime import reconcile_stock_positions
+    engines = {
+        pool: eng for pool, eng in (
+            ("largecap", positional_stocks_engine),
+            ("midcap", positional_stocks_midcap_engine),
+            ("smallcap", positional_stocks_smallcap_engine),
+        ) if eng is not None
+    }
+    if not engines:
+        raise HTTPException(status_code=503, detail="no positional_stocks pools enabled in config")
+    result = await reconcile_stock_positions(engines)
+    return result
+
+
 @app.post("/api/upstox/token_webhook/{secret}")
 async def upstox_token_webhook(secret: str, request: Request) -> dict:
     """Receives the daily Upstox access token after the user approves the

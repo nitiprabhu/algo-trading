@@ -278,3 +278,70 @@ class PositionalStocksRuntime:
             f"PnL: {position.pnl:+.2f} ({position.pnl_pct:+.2f}%)"
         )
         await notifier.send_message(msg)
+
+
+async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]) -> dict:
+    """Post-close reality check: pull actual Upstox CNC holdings and correct
+    any DB position that claims OPEN but was never actually filled at the
+    broker. Needed because _live_entry() commits the paper record before
+    the live order result comes back (by design -- a broker failure must
+    not silently roll back the paper trade) and only alerts on failure, so
+    a missed/rejected fill (funds, RMS block, price band, etc.) otherwise
+    leaves the DB permanently out of sync with the real book. Symbols held
+    at Upstox but untracked in any pool (e.g. a manual buy) are reported,
+    never auto-adopted into a pool's DB.
+
+    engines: {pool_name: PositionalStocksEngine}. Requires a valid today's
+    Upstox token; a stale/missing token is a no-op (never guess)."""
+    from services.chartedge_core.database import persist_stock_exit
+    from services.chartedge_core.upstox_broker import live_broker
+    from services.chartedge_core.upstox_market_data import fetch_holdings
+    from services.chartedge_core.telegram import notifier
+
+    broker = live_broker()
+    token = broker.get_valid_token()
+    if not token:
+        return {"ran": False, "reason": "no_valid_upstox_token"}
+
+    holdings = fetch_holdings(broker, token)
+    held_qty: dict[str, int] = {}
+    for h in holdings:
+        symbol = h.get("tradingsymbol")
+        if symbol:
+            held_qty[symbol] = held_qty.get(symbol, 0) + int(h.get("quantity", 0) or 0)
+
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    removed: list[str] = []
+    tracked_symbols: set[str] = set()
+
+    for pool, engine in engines.items():
+        tracked_symbols.update(engine.open_positions.keys())
+        tracked_symbols.update(p.symbol for p in engine.closed_positions)
+        for symbol, pos in list(engine.open_positions.items()):
+            if held_qty.get(symbol, 0) >= pos.quantity:
+                continue  # broker confirms this quantity is genuinely held
+            pos.status = "CLOSED"
+            pos.exit_date = today_str
+            pos.exit_price = pos.entry_price
+            pos.exit_reason = "RECONCILED_NOT_FILLED"
+            pos.pnl = 0.0
+            pos.pnl_pct = 0.0
+            persist_stock_exit(pos.id, today_str, pos.entry_price, "RECONCILED_NOT_FILLED", 0.0, 0.0, pos.peak_pnl_pct)
+            engine.closed_positions.append(pos)
+            del engine.open_positions[symbol]
+            removed.append(f"{pool}:{symbol}")
+
+    untracked = sorted(
+        symbol for symbol, qty in held_qty.items()
+        if qty > 0 and symbol not in tracked_symbols
+    )
+
+    if removed or untracked:
+        lines = ["[RECONCILE] Positional stocks vs Upstox holdings"]
+        if removed:
+            lines.append("Removed (never filled, DB corrected): " + ", ".join(removed))
+        if untracked:
+            lines.append("Held at broker but untracked by any pool (manual?): " + ", ".join(untracked))
+        await notifier.send_message("\n".join(lines))
+
+    return {"ran": True, "removed": removed, "untracked": untracked}

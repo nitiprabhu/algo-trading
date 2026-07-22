@@ -1,0 +1,26 @@
+name: Reconcile Positional Stocks vs Upstox
+
+# Runs once after market close (15:30 IST) to correct any pool's DB position
+# that claims OPEN but never actually filled at the broker (funds/RMS block,
+# price band, etc.) -- see positional_stocks_runtime.reconcile_stock_positions.
+on:
+  schedule:
+    - cron: "0 10 * * 1-5"   # 15:30 IST
+  workflow_dispatch: {}
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    environment: default
+    steps:
+      - name: Reconcile positional stocks
+        run: |
+          response=$(curl -sS -w "\n%{http_code}" -X POST \
+            "${{ vars.CHARTEDGE_API_HOST }}/api/positional_stocks/reconcile" \
+            -H "X-Trigger-Key: ${{ secrets.TRIGGER_API_KEY }}")
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          echo "HTTP $http_code"; echo "$body"
+          if [ "$http_code" -ge 400 ]; then
+            echo "::error::reconcile failed with HTTP $http_code"; exit 1
+          fi

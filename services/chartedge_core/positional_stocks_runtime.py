@@ -137,14 +137,16 @@ class PositionalStocksRuntime:
                 if require_trend_gate:
                     trend_confirmed = indicators["ema_ribbon"].vote == 1 and indicators["supertrend"].vote == 1
                 qualifies = score >= buy_threshold and adx_value >= min_adx and trend_confirmed
-                opened = self.engine.maybe_enter(
+                candidate = self.engine.build_entry_candidate(
                     symbol, today, price, score, buy_threshold, adx_value, min_adx,
                     trend_confirmed=trend_confirmed,
                 )
-                if opened:
-                    await self._notify_entry(opened, score)
-                    await self._live_entry(opened, price)
-                    entries.append(symbol)
+                if candidate:
+                    if await self._confirm_live_entry(candidate, price):
+                        self.engine.commit_entry(candidate)
+                        await self._notify_entry(candidate, score)
+                        entries.append(symbol)
+                    # else: broker rejected/unfilled -- candidate dropped, nothing persisted
                 elif qualifies and allow_rotation:
                     # fully qualifies but blocked purely by pool capacity/capital --
                     # defer to the rotation pass below, once every symbol's score is known.
@@ -195,10 +197,14 @@ class PositionalStocksRuntime:
         await notify_token_needed(reason=f"{self.engine.pool} pool")
 
     async def _live_entry(self, position, ref_price: float) -> None:
-        """Fire a live Upstox BUY + protective GTT stop for a fresh entry.
-        No-op unless live_trading is armed; on dry_run it just logs. Never
-        raises -- the paper record is already committed, so a broker failure
-        must not roll that back; it only alerts."""
+        """Fire a live Upstox BUY + protective GTT stop for an already-committed
+        entry (rotation path only -- see maybe_rotate_and_enter). No-op
+        unless live_trading is armed; on dry_run it just logs. Never raises --
+        the paper record is already committed here, so a broker failure must
+        not roll that back; it only alerts. The regular (non-rotation) entry
+        path instead confirms the broker BEFORE committing -- see
+        _confirm_live_entry -- specifically to avoid this phantom-record
+        failure mode; rotation still uses this older commit-first flow."""
         from services.chartedge_core.upstox_broker import live_broker, log_order_event
         from services.chartedge_core.telegram import notifier
         broker = live_broker()
@@ -219,6 +225,35 @@ class PositionalStocksRuntime:
                 f"⚠️ [{mode} ORDER FAILED] BUY {position.symbol} -- {res.reason}. "
                 f"Paper position stands; no live fill."
             )
+
+    async def _confirm_live_entry(self, candidate, ref_price: float) -> bool:
+        """Fire the live Upstox BUY for an as-yet-uncommitted candidate
+        (build_entry_candidate) and report whether it's safe to commit to the
+        DB: True when live trading is off entirely (pure paper -- always
+        commit) or the broker actually confirms the fill; False when the
+        broker is armed and rejected/failed the order, so the caller must
+        discard the candidate instead of persisting a phantom position."""
+        from services.chartedge_core.upstox_broker import live_broker, log_order_event
+        from services.chartedge_core.telegram import notifier
+        broker = live_broker()
+        if not broker.enabled:
+            return True  # live path entirely off -> pure paper, always commit
+        if not broker.dry_run:
+            await self._maybe_request_token(broker)
+        res = broker.place_entry(candidate.symbol, candidate.quantity, ref_price, self._live_tag())
+        log_order_event("BUY", candidate.symbol, res)
+        mode = "SIM" if res.simulated else "LIVE"
+        if res.ok:
+            await notifier.send_message(
+                f"[{mode} ORDER] BUY {candidate.symbol} x{candidate.quantity} "
+                f"tag={self._live_tag()} | {res.reason}"
+            )
+            return True
+        await notifier.send_message(
+            f"⚠️ [{mode} ORDER FAILED] BUY {candidate.symbol} -- {res.reason}. "
+            f"No DB entry created (broker did not confirm)."
+        )
+        return False
 
     async def _live_exit(self, position) -> None:
         """Fire a live Upstox SELL to close a live position on an engine exit.

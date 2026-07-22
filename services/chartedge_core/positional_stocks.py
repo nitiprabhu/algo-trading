@@ -320,14 +320,17 @@ class PositionalStocksEngine:
         desired = self.slot_capital() * multiplier
         return min(desired, available)
 
-    def maybe_enter(self, symbol: str, today: date, price: float, score: float,
-                     buy_threshold: float, adx_value: float, min_adx: float = 25.0,
-                     trend_confirmed: bool = True) -> Optional[StockPosition]:
-        """The ONLY way a position opens. Always a BUY -- there is no
-        equivalent maybe_short(). trend_confirmed is a hard AND-gate (both
-        EMA ribbon and Supertrend independently bullish) on top of the
-        weighted confluence score -- backtested to matter: without it,
-        12mo/4-stock return was -1.3%; with it (+ wider universe), +9.8%."""
+    def build_entry_candidate(self, symbol: str, today: date, price: float, score: float,
+                               buy_threshold: float, adx_value: float, min_adx: float = 25.0,
+                               trend_confirmed: bool = True) -> Optional[StockPosition]:
+        """Same gates as maybe_enter, but returns an unpersisted candidate --
+        nothing is written to open_positions or the DB. Lets the caller fire
+        the live broker order first and only call commit_entry() if it's
+        actually confirmed, so a rejected/unfilled BUY never becomes a
+        phantom DB position. trend_confirmed is a hard AND-gate (both EMA
+        ribbon and Supertrend independently bullish) on top of the weighted
+        confluence score -- backtested to matter: without it, 12mo/4-stock
+        return was -1.3%; with it (+ wider universe), +9.8%."""
         if symbol in self.open_positions:
             return None
         if len(self.open_positions) >= self.max_positions:
@@ -344,14 +347,33 @@ class PositionalStocksEngine:
         if quantity <= 0:
             return None
 
-        from services.chartedge_core.database import persist_stock_entry
-        position = StockPosition(
+        return StockPosition(
             id=str(uuid4()), symbol=symbol, entry_date=today.strftime("%Y-%m-%d"),
             entry_price=round(price, 2), quantity=quantity,
         )
-        self.open_positions[symbol] = position
-        persist_stock_entry(symbol, position.entry_date, position.entry_price, quantity, pool=self.pool)
-        return position
+
+    def commit_entry(self, position: StockPosition) -> None:
+        """Persist a candidate built by build_entry_candidate. Call only
+        after the live broker has confirmed the fill (or live trading is
+        off entirely, i.e. pure paper mode)."""
+        from services.chartedge_core.database import persist_stock_entry
+        self.open_positions[position.symbol] = position
+        persist_stock_entry(position.symbol, position.entry_date, position.entry_price,
+                            position.quantity, pool=self.pool)
+
+    def maybe_enter(self, symbol: str, today: date, price: float, score: float,
+                     buy_threshold: float, adx_value: float, min_adx: float = 25.0,
+                     trend_confirmed: bool = True) -> Optional[StockPosition]:
+        """Build + immediately commit a candidate, with no broker-confirmation
+        gate. Used where there's no live order to wait on (rotation path) --
+        see positional_stocks_runtime.check_once_per_day for the gated path
+        used on regular entries."""
+        candidate = self.build_entry_candidate(symbol, today, price, score,
+                                                buy_threshold, adx_value, min_adx, trend_confirmed)
+        if candidate is None:
+            return None
+        self.commit_entry(candidate)
+        return candidate
 
     def check_exit(self, symbol: str, today: date, price: float, score: float,
                     sell_threshold: float, trail_arm_pct: float = 3.0,

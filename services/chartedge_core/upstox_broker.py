@@ -53,6 +53,7 @@ IST = ZoneInfo("Asia/Kolkata")
 # --- Upstox REST endpoints. Verify against current Upstox API docs before
 # arming live; kept as constants so a version bump is a one-line change. ---
 UPSTOX_API_BASE = os.getenv("UPSTOX_API_BASE", "https://api.upstox.com/v2")
+HOLDINGS_PATH = "/portfolio/long-term-holdings"
 PLACE_ORDER_PATH = "/order/place"
 ORDER_DETAILS_PATH = "/order/details"
 # GTT lives on a separate (newer) API version on Upstox; override via env if
@@ -263,6 +264,25 @@ class UpstoxBroker:
             print(f"[UpstoxBroker] funds check failed: {e}")
             return None
 
+    def get_held_quantity(self, symbol: str, token: str) -> Optional[int]:
+        """Live delivery holding for `symbol` from Upstox long-term-holdings.
+        Returns None on any HTTP/parse failure (caller fails closed), 0 if
+        the symbol simply isn't in the portfolio."""
+        instrument = self.instrument_keys.get(symbol)
+        try:
+            resp = requests.get(f"{self._api_base}{HOLDINGS_PATH}",
+                                 headers=self._headers(token), timeout=15)
+            if resp.status_code != 200:
+                print(f"[UpstoxBroker] holdings check HTTP {resp.status_code}: {resp.text[:150]}")
+                return None
+            for h in resp.json().get("data", []) or []:
+                if h.get("instrument_token") == instrument or h.get("tradingsymbol") == symbol:
+                    return int(h.get("quantity") or 0)
+            return 0
+        except Exception as e:
+            print(f"[UpstoxBroker] holdings check failed: {e}")
+            return None
+
     def _headers(self, token: str) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {token}",
@@ -443,6 +463,23 @@ class UpstoxBroker:
         if not token:
             return OrderResult(ok=False, simulated=False,
                                reason="no valid token for today (GTT stop still protects)")
+
+        # --- holdings-aware sizing: our DB record can drift from the actual
+        # Upstox portfolio (manual sell, GTT stop already fired, partial
+        # fill). Check what's really held and cap/skip rather than firing a
+        # SELL Upstox will reject outright.
+        held = self.get_held_quantity(symbol, token)
+        if held is None:
+            return OrderResult(ok=False, simulated=False,
+                               reason="holdings check failed -- not selling blind")
+        if held <= 0:
+            return OrderResult(ok=False, simulated=False,
+                               reason=f"{symbol} not held in portfolio (DB says {quantity}) -- skipping exit")
+        if held < quantity:
+            print(f"[UpstoxBroker] {symbol}: exit sizing down {quantity} -> {held} "
+                  f"(portfolio holds less than DB record)")
+            quantity = held
+
         try:
             body = {
                 "quantity": int(quantity), "product": PRODUCT_DELIVERY,

@@ -1,10 +1,9 @@
 """
 positional_runtime.py
 ----------------------
-Live wiring for positional_trading.py against a pluggable market-data
-provider (see positional_data_provider.py -- IndstocksDataProvider or
-UpstoxDataProvider, selected via shared/config.yaml positional_risk.
-data_source). Runs one check per trading day (idempotent -- safe to call
+Live wiring for positional_trading.py against the Upstox market-data
+provider (see positional_data_provider.py -- UpstoxDataProvider).
+Runs one check per trading day (idempotent -- safe to call
 every few minutes). Sends Telegram alerts on entry/exit. Fully separate
 from the intraday PaperTradingEngine/FuturesTradingEngine -- reads
 market data read-only, never touches intraday positions or capital.

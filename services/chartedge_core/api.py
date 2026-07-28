@@ -44,20 +44,11 @@ _positional_cfg = config.positional_risk or {}
 if _positional_cfg.get("enabled", False):
     from services.chartedge_core.positional_trading import PositionalTradingEngine
     from services.chartedge_core.positional_runtime import PositionalRuntime
-    from services.chartedge_core.positional_data_provider import IndstocksDataProvider, UpstoxDataProvider
+    from services.chartedge_core.positional_data_provider import UpstoxDataProvider
 
-    # Data source is a plugin, not a full runtime swap: only spot/VIX/option
-    # chain/premium resolution is affected. One provider instance is shared
-    # across every engine (mode: parallel) since they all read the same
-    # NIFTY chain -- avoids redundant REST calls. env var mirrors the
-    # existing CHARTEDGE_DATA_SOURCE pattern (api.py:27).
-    _positional_data_source = os.getenv("POSITIONAL_DATA_SOURCE", _positional_cfg.get("data_source", "indstocks"))
-    if _positional_data_source == "upstox":
-        _positional_provider = UpstoxDataProvider()
-        print("DEBUG: Weekly positional data source: upstox")
-    else:
-        _positional_provider = IndstocksDataProvider(runtime)
-        print("DEBUG: Weekly positional data source: indstocks")
+    # Weekly positional data source is Upstox-only -- no INDstocks fallback.
+    _positional_provider = UpstoxDataProvider()
+    print("DEBUG: Weekly positional data source: upstox")
 
     if _positional_cfg.get("mode", "single") == "parallel":
         _parallel_specs = _positional_cfg.get("parallel") or []

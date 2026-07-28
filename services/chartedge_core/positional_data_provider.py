@@ -1,30 +1,25 @@
 """
 positional_data_provider.py
 ----------------------------
-Pluggable market-data source for the weekly positional options module
-(positional_runtime.py / positional_trading.py). Two implementations:
+Market-data source for the weekly positional options module
+(positional_runtime.py / positional_trading.py). Upstox-only in
+production (api.py hardcodes UpstoxDataProvider): REST calls sourcing
+NIFTY spot/VIX/option chain/leg LTP from Upstox v2
+(services/chartedge_core/upstox_market_data.py), reusing the same
+same-day WhatsApp/app token-approval flow already wired for order
+execution in upstox_broker.py -- no separate manual token chore for
+this module.
 
-  IndstocksDataProvider -- wraps the existing IndstocksMarketRuntime + its
-    DerivativeManager (INDMONEY_TOKEN, manual refresh required).
-  UpstoxDataProvider -- REST-only, sources NIFTY spot/VIX/option chain/leg
-    LTP from Upstox v2 (services/chartedge_core/upstox_market_data.py),
-    reusing the same same-day WhatsApp/app token-approval flow already
-    wired for order execution in upstox_broker.py -- no separate manual
-    token chore for this module.
+IndstocksDataProvider below is kept dormant for future use only -- not
+imported or instantiated anywhere currently.
 
-Selected via shared/config.yaml positional_risk.data_source (indstocks |
-upstox), see api.py. Both providers return the same chain-row shape
-({"strike", "expiry", "ce_token", "pe_token"}) and premiums shape
-({strike: {"CE": ltp, "PE": ltp}}) so positional_runtime.py and
-positional_trading.py need no per-provider branching -- and neither
-provider's tokens ever reach PositionalTradingEngine, which only ever
-sees strike-keyed premium dicts (plain floats). INDstocks tokens
-(NIDX:/NFO: scrip codes) and Upstox instrument keys (NSE_INDEX|/NSE_FO|)
-are entirely separate identifier spaces and never cross between the two
-providers.
+Chain-row shape is {"strike", "expiry", "ce_token", "pe_token"} and
+premiums shape is {strike: {"CE": ltp, "PE": ltp}}; neither ever reaches
+PositionalTradingEngine, which only ever sees strike-keyed premium dicts
+(plain floats).
 
-Methods are async (not sync) even though most implementations are
-blocking REST calls under the hood -- matches positional_runtime.py's
+Methods are async (not sync) even though the implementation is a
+blocking REST call under the hood -- matches positional_runtime.py's
 existing async call site, and lets UpstoxDataProvider await the shared
 Telegram token-needed alert (upstox_broker.notify_token_needed) inline
 instead of a fire-and-forget hack.
@@ -64,10 +59,14 @@ class MarketDataProvider(ABC):
     async def get_leg_premiums(self, chain: list[dict], legs: list[Leg]) -> dict[float, dict[str, float]]: ...
 
 
+# Kept for future use only -- NOT wired into api.py (weekly positional is
+# Upstox-only by design, see api.py:44). Re-enable by importing this class
+# there and branching on config.positional_risk.data_source again if a
+# reason to fall back to INDstocks ever comes up.
 def _fetch_indstocks_ltp(base_url: str, token: str, scrip_code: str) -> Optional[float]:
     """One-off REST quote via the last 1-min historical candle (INDstocks has
     no dedicated LTP endpoint; reuses the same historical API the intraday
-    engine already relies on). Moved here verbatim from positional_runtime.py."""
+    engine already relies on)."""
     try:
         now = datetime.now(IST)
         start = now.replace(hour=9, minute=15, second=0, microsecond=0)
@@ -94,8 +93,9 @@ def _fetch_indstocks_ltp(base_url: str, token: str, scrip_code: str) -> Optional
 
 class IndstocksDataProvider(MarketDataProvider):
     """Thin wrapper over the existing IndstocksMarketRuntime + DerivativeManager.
-    Preserves exact prior behavior (positional_runtime.py pre-refactor) --
-    all blocking calls, just wrapped in async defs to satisfy the interface."""
+    Kept for future use -- not currently instantiated anywhere (api.py hardcodes
+    UpstoxDataProvider). All blocking calls, wrapped in async defs to satisfy
+    the interface."""
 
     def __init__(self, market_runtime):
         self.market_runtime = market_runtime

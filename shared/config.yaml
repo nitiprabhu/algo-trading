@@ -156,8 +156,7 @@ positional_risk:
   # capital pool, isolated from intraday. See scratch/real_options_strategy_comparison.py
   # for the validation methodology (2yr real bhavcopy data).
   enabled: true           # LIVE: watch for Telegram entry/exit alerts during market hours
-  data_source: upstox  # indstocks (default, INDMONEY_TOKEN, manual refresh) |
-                           # upstox (REST-only, reuses the live_trading WhatsApp/app
+  data_source: upstox  # Upstox-only (REST, reuses the live_trading WhatsApp/app
                            # token-approval flow -- see positional_data_provider.py)
   mode: single             # single (1 engine, `strategy` below)
   strategy: condor        # used when mode: single. condor (default, bounded risk) |
@@ -181,7 +180,7 @@ positional_risk:
     # 1yr backtest basis (run_1year_positional_backtest.py, Jul25-Jul26):
     # condor +₹41.9k on ₹1L, max single loss -₹6.9k, max drawdown -₹12.4k.
     enabled: true          # dry-run observation week first (orders logged, nothing placed)
-    dry_run: true          # flip to false ONLY after a clean dry-run week
+    dry_run: false         # LIVE armed 2026-07-28 -- ₹1L funded, one clean dry-run trade (+₹3367.50) prior
     max_margin: 100000.0   # hard cap on margin this module may consume from the common pool
 
 positional_stocks_risk:

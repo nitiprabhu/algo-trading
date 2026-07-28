@@ -181,7 +181,9 @@ positional_risk:
     # 1yr backtest basis (run_1year_positional_backtest.py, Jul25-Jul26):
     # condor +₹41.9k on ₹1L, max single loss -₹6.9k, max drawdown -₹12.4k.
     enabled: true          # dry-run observation week first (orders logged, nothing placed)
-    dry_run: false         # LIVE armed 2026-07-28 -- ₹1L funded, one clean dry-run trade (+₹3367.50) prior
+    dry_run: true          # paused 2026-07-28 -- F&O segment not yet activated on Upstox
+                           # (UDAPI100500), reactivation raised, ETA 2-3 days. Flip to false
+                           # once segment shows active.
     max_margin: 100000.0   # hard cap on margin this module may consume from the common pool
 
 positional_stocks_risk:

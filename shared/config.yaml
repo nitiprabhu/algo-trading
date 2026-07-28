@@ -391,6 +391,13 @@ live_trading:
   gtt_stop_pct: 4.0         # server-side GTT stop-loss %, matches engine stop_loss_pct.
                             # Lives on Upstox independent of the daily token -- protects
                             # open positions even if the daily approval is forgotten.
+  reserve_for_options: 120000.0  # funds floor stock-pool BUYs must never dip below --
+                            # keeps the weekly condor's margin (~71.6k confirmed
+                            # 2026-07-28, buffer to 1.2L) safe from the stock pools'
+                            # own funds check, which otherwise treats the whole
+                            # account balance as spendable. See upstox_broker.py
+                            # place_entry() and upstox_options_broker.py's
+                            # COMMON-POOL FUNDS docstring.
   # NO gtt target leg by design: a server-side target would force an exit while
   # re-entry needs the (possibly absent) token -> manufactured missed opportunity.
   # Targets/trailing/sell-signal stay dynamic in the engine.

@@ -218,6 +218,10 @@ class UpstoxBroker:
         # could trade the wrong instrument.
         self.instrument_keys: dict[str, str] = self.cfg.get("instrument_keys", {}) or {}
         self.api_key: Optional[str] = os.getenv("UPSTOX_API_KEY")
+        # Funds floor the stock pools must never buy into -- keeps the shared
+        # account balance available for the weekly options module's margin
+        # (see upstox_options_broker.py's COMMON-POOL FUNDS docstring).
+        self.reserve_for_options: float = float(self.cfg.get("reserve_for_options", 0.0))
 
     # --- gates -------------------------------------------------------------
     def is_armed(self) -> bool:
@@ -334,10 +338,12 @@ class UpstoxBroker:
         if funds is None:
             return OrderResult(ok=False, simulated=False,
                                reason="funds check failed -- not placing blind")
-        affordable = int((funds * 0.99) // ref_price) if ref_price > 0 else 0
+        spendable = max(0.0, funds - self.reserve_for_options)
+        affordable = int((spendable * 0.99) // ref_price) if ref_price > 0 else 0
         if affordable <= 0:
             return OrderResult(ok=False, simulated=False,
-                               reason=f"insufficient funds: ₹{funds:,.0f} available, "
+                               reason=f"insufficient funds: ₹{funds:,.0f} available "
+                                      f"(₹{self.reserve_for_options:,.0f} reserved for options), "
                                       f"1 share needs ~₹{ref_price:,.0f}")
         if affordable < quantity:
             print(f"[UpstoxBroker] {symbol}: sizing down {quantity} -> {affordable} "

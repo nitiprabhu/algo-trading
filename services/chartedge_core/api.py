@@ -350,6 +350,43 @@ async def lifespan(app: FastAPI):
                 await notifier.send_message("\n".join(lines))
     asyncio.create_task(daily_digest_loop())
 
+    # Paper-vs-broker reconcile at 15:40 IST -- in-process, same
+    # no-external-cron rationale as self_shutdown_loop below (an external
+    # scheduler is another moving part that can silently not fire). Runs
+    # after the 15:35 digest, before the 17:00 self-shutdown. No-op inside
+    # each reconcile call unless that module's live_trading is armed.
+    async def reconcile_loop():
+        last_run_date = None
+        while True:
+            await asyncio.sleep(300)
+            now_ist = datetime.now(IST)
+            if now_ist.hour == 15 and now_ist.minute >= 40:
+                today = now_ist.strftime("%Y-%m-%d")
+                if last_run_date == today:
+                    continue
+                last_run_date = today
+                if positional_engines:
+                    try:
+                        from services.chartedge_core.positional_runtime import reconcile_options_position
+                        live_cfg = (_positional_cfg or {}).get("live_trading") or {}
+                        await reconcile_options_position(positional_engines, live_cfg)
+                    except Exception as e:
+                        print(f"⚠️ [Reconcile] options reconcile failed: {e}")
+                stock_engines = {
+                    pool: eng for pool, eng in (
+                        ("largecap", positional_stocks_engine),
+                        ("midcap", positional_stocks_midcap_engine),
+                        ("smallcap", positional_stocks_smallcap_engine),
+                    ) if eng is not None
+                }
+                if stock_engines:
+                    try:
+                        from services.chartedge_core.positional_stocks_runtime import reconcile_stock_positions
+                        await reconcile_stock_positions(stock_engines)
+                    except Exception as e:
+                        print(f"⚠️ [Reconcile] stocks reconcile failed: {e}")
+    asyncio.create_task(reconcile_loop())
+
     # Self-shutdown at day's end -- in-process, no external cron dependency.
     # GitHub Actions' scheduled power-off/power-on crons are best-effort and
     # single-shot daily triggers get silently dropped often enough that this
@@ -599,6 +636,28 @@ async def reconcile_positional_stocks(x_trigger_key: Optional[str] = Header(defa
     if not engines:
         raise HTTPException(status_code=503, detail="no positional_stocks pools enabled in config")
     result = await reconcile_stock_positions(engines)
+    return result
+
+
+@app.post("/api/positional/reconcile")
+async def reconcile_positional_options(x_trigger_key: Optional[str] = Header(default=None)) -> dict:
+    """Weekly-options counterpart of /api/positional_stocks/reconcile: check
+    the paper condor's legs against the account's REAL Upstox F&O positions
+    and alert on any divergence (entry never fully filled, or an exit basket
+    that failed and left live short-premium legs unmanaged). Alert-only --
+    multi-leg option state is never auto-corrected. No-op unless
+    positional_risk.live_trading is armed. Same auth as the other triggers;
+    meant for the same external post-close scheduler."""
+    expected_key = os.getenv("TRIGGER_API_KEY")
+    if not expected_key:
+        raise HTTPException(status_code=503, detail="TRIGGER_API_KEY not configured on server")
+    if x_trigger_key != expected_key:
+        raise HTTPException(status_code=403, detail="invalid or missing X-Trigger-Key header")
+    if not positional_engines:
+        raise HTTPException(status_code=503, detail="positional_risk not enabled in config")
+    from services.chartedge_core.positional_runtime import reconcile_options_position
+    live_cfg = (_positional_cfg or {}).get("live_trading") or {}
+    result = await reconcile_options_position(positional_engines, live_cfg)
     return result
 
 

@@ -268,11 +268,18 @@ class PositionalTradingEngine:
                   f"positional_risk.strategy / positional_risk.parallel in "
                   f"shared/config.yaml.")
 
-    def maybe_enter(
+    def build_entry(
         self, today: date, spot: float, vix: float, chain_premiums: dict[float, dict[str, float]],
         target_expiry: Optional[date] = None, trend_pct: float = 0.0,
     ) -> Optional[PositionalTrade]:
-        """chain_premiums: {strike: {"CE": premium, "PE": premium}} for the target expiry.
+        """Run every entry gate and return an UNCOMMITTED candidate trade --
+        open_trade is not set and nothing is persisted. The live runtime
+        places the broker basket first and only calls commit_entry() on
+        confirmation, so a rejected/failed basket never becomes a phantom
+        paper position (same confirm-before-commit pattern as
+        positional_stocks.build_entry_candidate).
+
+        chain_premiums: {strike: {"CE": premium, "PE": premium}} for the target expiry.
         target_expiry: the REAL next weekly expiry as resolved from the live/historical
         option chain (holidays shift NSE expiries -- weekday arithmetic alone can miss
         those weeks). Falls back to weekday arithmetic only if not supplied."""
@@ -297,16 +304,32 @@ class PositionalTradingEngine:
         if not self.strategy.should_enter(spot, credit):
             return None
 
-        trade = PositionalTrade(
+        return PositionalTrade(
             id=str(uuid4()), strategy=self.strategy_name,
             entry_date=today.strftime("%Y-%m-%d"), expiry=expiry.strftime("%Y-%m-%d"),
             spot_at_entry=spot, vix_at_entry=vix, legs=legs, credit=round(credit, 2), quantity=LOT_SIZE,
         )
+
+    def commit_entry(self, trade: PositionalTrade) -> PositionalTrade:
+        """Persist a candidate built by build_entry. Call only after the live
+        broker confirmed the basket (or live trading is off / dry_run)."""
         self.open_trade = trade
         if not self.is_backtesting:
             from services.chartedge_core.database import persist_positional_entry
             persist_positional_entry(trade)
         return trade
+
+    def maybe_enter(
+        self, today: date, spot: float, vix: float, chain_premiums: dict[float, dict[str, float]],
+        target_expiry: Optional[date] = None, trend_pct: float = 0.0,
+    ) -> Optional[PositionalTrade]:
+        """Build + immediately commit, with no broker-confirmation gate.
+        Used by backtests and any caller with no live order to wait on; the
+        live runtime uses build_entry/commit_entry instead."""
+        trade = self.build_entry(today, spot, vix, chain_premiums, target_expiry, trend_pct)
+        if trade is None:
+            return None
+        return self.commit_entry(trade)
 
     def mark_to_market(self, today: date, chain_premiums: dict[float, dict[str, float]]) -> Optional[PositionalTrade]:
         """Call once per trading day (or per tick, live) with current option premiums

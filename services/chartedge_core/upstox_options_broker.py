@@ -196,9 +196,17 @@ class UpstoxOptionsBroker:
                 failed.append(f"{leg.label or leg.instrument_key}: {why}")
         return failed
 
-    def place_basket(self, legs: list[LegOrder], tag: str) -> BasketResult:
+    def place_basket(self, legs: list[LegOrder], tag: str, closing: bool = False) -> BasketResult:
         """Entry basket. BUY legs first (never-naked invariant), then SELL.
-        Partial failure -> unwind everything placed so far."""
+        Partial failure -> unwind everything placed so far.
+
+        closing=True (set by close_basket) SKIPS the funds/margin gate: the
+        margin API prices each order as a NEW position -- it can't see the
+        opposite legs already held -- so closing SELL legs (selling our long
+        wings) get margined as fresh naked shorts, a huge phantom requirement
+        that can spuriously fail funds_ok and leave a short-premium position
+        STUCK OPEN. Closing always reduces real risk; it must never be
+        blocked by a funds check."""
         if not legs:
             return BasketResult(ok=False, simulated=True, reason="no legs")
 
@@ -216,9 +224,12 @@ class UpstoxOptionsBroker:
         if not token:
             return BasketResult(ok=False, simulated=False, reason="no valid token for today")
 
-        ok, gate_reason = self.funds_ok(token, ordered)
-        if not ok:
-            return BasketResult(ok=False, simulated=False, reason=gate_reason)
+        if closing:
+            gate_reason = "exit basket -- funds gate bypassed (closing reduces risk)"
+        else:
+            ok, gate_reason = self.funds_ok(token, ordered)
+            if not ok:
+                return BasketResult(ok=False, simulated=False, reason=gate_reason)
 
         placed: list[LegOrder] = []
         for leg in ordered:
@@ -243,8 +254,9 @@ class UpstoxOptionsBroker:
             label=f"CLOSE {l.label}",
         ) for l in legs]
         # BUY-backs (closing shorts) first -- place_basket's BUY-first order
-        # does exactly that for the reversed set.
-        return self.place_basket(reversed_legs, tag)
+        # does exactly that for the reversed set. closing=True bypasses the
+        # funds gate (see place_basket docstring -- exits must never block).
+        return self.place_basket(reversed_legs, tag, closing=True)
 
 
 def options_broker(cfg: Optional[dict[str, Any]] = None) -> UpstoxOptionsBroker:

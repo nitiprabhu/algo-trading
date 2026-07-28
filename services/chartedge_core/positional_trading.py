@@ -56,7 +56,8 @@ from typing import Callable, Optional
 from uuid import uuid4
 
 STEP = 50            # NIFTY strike interval
-LOT_SIZE = 75         # current NIFTY lot size (revise if NSE changes it again)
+LOT_SIZE = 65         # current NIFTY lot size (SEBI revised 25->75->65; confirmed via
+                      # Upstox /option/contract 2026-07-28 -- revise if NSE changes it again)
 SHORT_SIGMA_MULT = 0.85
 WING_SIGMA_MULT = 1.30
 PROFIT_TAKE_FRAC = 0.55   # exit once 55% of credit is captured

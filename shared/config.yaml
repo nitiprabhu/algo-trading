@@ -165,7 +165,8 @@ positional_risk:
                            # entries only on rich-IV weeks -- best 2yr Sharpe of all 4,
                            # see positional_trading.py)
   capital: 100000.0       # separate allocation, not shared with intraday total_capital
-  lot_size: 75            # NIFTY lot size (SEBI revised 25->75; update if changed again)
+  lot_size: 65            # NIFTY lot size (SEBI revised 25->75->65; confirmed via Upstox
+                           # /option/contract lot_size field 2026-07-28 -- update if changed again)
   profit_take_frac: 0.55
   stop_credit_mult: 1.1   # tighter stop for lower per-trade pain; see positional_trading.py comment
   short_sigma_mult: 0.85
@@ -305,7 +306,7 @@ positional_stocks_smallcap_risk:
 
 futures_risk:
   NIFTY_FUT:
-    lot_size: 75
+    lot_size: 65  # SEBI revised 25->75->65; confirmed via Upstox /option/contract 2026-07-28
     max_lots: 2
     sl_points: 50
     target_1_points: 75

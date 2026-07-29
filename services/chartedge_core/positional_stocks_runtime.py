@@ -271,7 +271,12 @@ class PositionalStocksRuntime:
     async def _live_exit(self, position) -> None:
         """Fire a live Upstox SELL to close a live position on an engine exit.
         If no valid token, the sell is skipped and the position's server-side
-        GTT stop remains the protective floor -- surfaced via alert."""
+        GTT stop remains the protective floor -- surfaced via alert. On a
+        real successful sell, also cancel that symbol's protective GTT stop
+        -- otherwise it's left dangling at the broker with no holding behind
+        it (harmless -- it'd just fail to trigger -- but clutters the GTT
+        book; the same class of orphan the reconcile job cleans up for the
+        never-filled case, here handled immediately at exit time instead)."""
         from services.chartedge_core.upstox_broker import live_broker, log_order_event
         from services.chartedge_core.telegram import notifier
         broker = live_broker()
@@ -286,10 +291,33 @@ class PositionalStocksRuntime:
             await notifier.send_message(
                 f"[{mode} ORDER] SELL {position.symbol} x{position.quantity} | {res.reason}"
             )
+            if not res.simulated:
+                await self._cancel_gtt_for_symbol(broker, position.symbol)
         else:
             await notifier.send_message(
                 f"⚠️ [{mode} ORDER FAILED] SELL {position.symbol} -- {res.reason}"
             )
+
+    async def _cancel_gtt_for_symbol(self, broker, symbol: str) -> None:
+        """Cancel any SCHEDULED GTT stop for symbol -- called right after a
+        confirmed real SELL so the protective stop doesn't sit dangling at
+        the broker with no holding behind it."""
+        from services.chartedge_core.telegram import notifier
+        token = broker.get_valid_token()
+        if not token:
+            return
+        for g in broker.list_gtt(token):
+            if g.get("trading_symbol") != symbol:
+                continue
+            if g.get("rules", [{}])[0].get("status") != "SCHEDULED":
+                continue
+            gtt_id = g.get("gtt_order_id")
+            res = broker.cancel_gtt(gtt_id, token)
+            if not res.ok:
+                await notifier.send_message(
+                    f"⚠️ [Positional Stocks] GTT cancel failed for {symbol} ({gtt_id}) "
+                    f"after sell: {res.reason}"
+                )
 
     async def _notify_entry(self, position, score: float) -> None:
         from services.chartedge_core.telegram import notifier

@@ -436,11 +436,17 @@ class UpstoxBroker:
     def cancel_gtt(self, gtt_order_id: str, token: str) -> OrderResult:
         """Cancel a single GTT order (e.g. an orphaned protective stop left
         over after a BUY that never actually filled -- see
-        positional_stocks_runtime.reconcile_stock_positions). Never raises."""
+        positional_stocks_runtime.reconcile_stock_positions -- or a stop
+        left dangling after a normal engine-driven sell). Never raises.
+
+        Upstox wants gtt_order_id in the DELETE request BODY, not as a query
+        param -- the query-param form silently 400s with a generic "Invalid
+        input" error (UDAPI100038), which is why every cancel attempt had
+        been failing unnoticed (only printed to console, never alerted)."""
         try:
             resp = requests.delete(f"{self._gtt_base}{GTT_CANCEL_PATH}",
                                    headers=self._headers(token),
-                                   params={"gtt_order_id": gtt_order_id}, timeout=15)
+                                   json={"gtt_order_id": gtt_order_id}, timeout=15)
             if resp.status_code not in (200, 201):
                 return OrderResult(ok=False, simulated=False,
                                    reason=f"GTT cancel HTTP {resp.status_code}: {resp.text[:200]}")

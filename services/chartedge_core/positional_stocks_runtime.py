@@ -271,7 +271,12 @@ class PositionalStocksRuntime:
     async def _live_exit(self, position) -> None:
         """Fire a live Upstox SELL to close a live position on an engine exit.
         If no valid token, the sell is skipped and the position's server-side
-        GTT stop remains the protective floor -- surfaced via alert."""
+        GTT stop remains the protective floor -- surfaced via alert. On a
+        real successful sell, also cancel that symbol's protective GTT stop
+        -- otherwise it's left dangling at the broker with no holding behind
+        it (harmless -- it'd just fail to trigger -- but clutters the GTT
+        book; the same class of orphan the reconcile job cleans up for the
+        never-filled case, here handled immediately at exit time instead)."""
         from services.chartedge_core.upstox_broker import live_broker, log_order_event
         from services.chartedge_core.telegram import notifier
         broker = live_broker()
@@ -286,10 +291,33 @@ class PositionalStocksRuntime:
             await notifier.send_message(
                 f"[{mode} ORDER] SELL {position.symbol} x{position.quantity} | {res.reason}"
             )
+            if not res.simulated:
+                await self._cancel_gtt_for_symbol(broker, position.symbol)
         else:
             await notifier.send_message(
                 f"⚠️ [{mode} ORDER FAILED] SELL {position.symbol} -- {res.reason}"
             )
+
+    async def _cancel_gtt_for_symbol(self, broker, symbol: str) -> None:
+        """Cancel any SCHEDULED GTT stop for symbol -- called right after a
+        confirmed real SELL so the protective stop doesn't sit dangling at
+        the broker with no holding behind it."""
+        from services.chartedge_core.telegram import notifier
+        token = broker.get_valid_token()
+        if not token:
+            return
+        for g in broker.list_gtt(token):
+            if g.get("trading_symbol") != symbol:
+                continue
+            if g.get("rules", [{}])[0].get("status") != "SCHEDULED":
+                continue
+            gtt_id = g.get("gtt_order_id")
+            res = broker.cancel_gtt(gtt_id, token)
+            if not res.ok:
+                await notifier.send_message(
+                    f"⚠️ [Positional Stocks] GTT cancel failed for {symbol} ({gtt_id}) "
+                    f"after sell: {res.reason}"
+                )
 
     async def _notify_entry(self, position, score: float) -> None:
         from services.chartedge_core.telegram import notifier
@@ -343,7 +371,7 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
     Upstox token; a stale/missing token is a no-op (never guess)."""
     from services.chartedge_core.database import persist_stock_exit
     from services.chartedge_core.upstox_broker import live_broker
-    from services.chartedge_core.upstox_market_data import fetch_holdings
+    from services.chartedge_core.upstox_market_data import fetch_holdings, fetch_order_book
     from services.chartedge_core.telegram import notifier
 
     broker = live_broker()
@@ -358,8 +386,48 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
         if symbol:
             held_qty[symbol] = held_qty.get(symbol, 0) + int(h.get("quantity", 0) or 0)
 
+    # Real SELL fill prices from today's order book -- weighted-average
+    # across completed SELL orders per symbol, for positions that turn out
+    # to have actually sold (see branch below) rather than never filled.
+    orders = fetch_order_book(broker, token)
+    sell_fill: dict[str, tuple[float, int]] = {}  # symbol -> (total_value, total_qty)
+    for o in orders:
+        symbol = o.get("trading_symbol") or o.get("tradingsymbol")
+        status = (o.get("status") or "").lower()
+        if not symbol or o.get("transaction_type") != "SELL" or status != "complete":
+            continue
+        qty = int(o.get("filled_quantity", 0) or 0)
+        avg_price = float(o.get("average_price", 0) or 0)
+        if qty <= 0 or avg_price <= 0:
+            continue
+        total_value, total_qty = sell_fill.get(symbol, (0.0, 0))
+        sell_fill[symbol] = (total_value + avg_price * qty, total_qty + qty)
+
+    # Today's BUY order status per symbol. Needed because
+    # /portfolio/long-term-holdings reflects T+1 SETTLED holdings -- a stock
+    # bought today never appears there until tomorrow regardless of whether
+    # the buy actually succeeded. Checking held_qty alone for a same-day
+    # entry would wrongly close every genuinely-filled same-day BUY too, not
+    # just failed ones (this bit us for real: ADANIENSOL/FEDERALBNK/others
+    # got zeroed out this way before this fix). "complete" -> really filled,
+    # keep OPEN even though holdings won't show it until tomorrow.
+    # "rejected"/"cancelled" -> genuinely never filled, safe to close.
+    # Anything else (open/trigger pending/etc) -> still in flight, leave
+    # alone and re-check next run.
+    buy_status: dict[str, str] = {}
+    for o in orders:
+        symbol = o.get("trading_symbol") or o.get("tradingsymbol")
+        if not symbol or o.get("transaction_type") != "BUY":
+            continue
+        status = (o.get("status") or "").lower()
+        # complete takes priority over any other status seen for the symbol
+        if status == "complete" or buy_status.get(symbol) != "complete":
+            buy_status[symbol] = status
+
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
     removed: list[str] = []
+    reconciled_exits: list[str] = []
+    ambiguous: list[str] = []
     tracked_symbols: set[str] = set()
 
     for pool, engine in engines.items():
@@ -368,16 +436,58 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
         for symbol, pos in list(engine.open_positions.items()):
             if held_qty.get(symbol, 0) >= pos.quantity:
                 continue  # broker confirms this quantity is genuinely held
-            pos.status = "CLOSED"
-            pos.exit_date = today_str
-            pos.exit_price = pos.entry_price
-            pos.exit_reason = "RECONCILED_NOT_FILLED"
-            pos.pnl = 0.0
-            pos.pnl_pct = 0.0
-            persist_stock_exit(pos.id, today_str, pos.entry_price, "RECONCILED_NOT_FILLED", 0.0, 0.0, pos.peak_pnl_pct)
-            engine.closed_positions.append(pos)
-            del engine.open_positions[symbol]
-            removed.append(f"{pool}:{symbol}")
+
+            if symbol in sell_fill:
+                # Today's order book positively confirms a completed SELL --
+                # a real exit happened outside our own exit path (GTT stop
+                # trigger, manual sell, or a live_exit() that fired but
+                # silently failed to notify) and the DB never learned about
+                # it. This is the only case we trust enough to auto-close
+                # with a computed price, because we have direct evidence.
+                total_value, total_qty = sell_fill[symbol]
+                exit_price = round(total_value / total_qty, 2)
+                pnl = round((exit_price - pos.entry_price) * pos.quantity, 2)
+                pnl_pct = round((exit_price - pos.entry_price) / pos.entry_price * 100, 2) if pos.entry_price else 0.0
+                pos.status = "CLOSED"
+                pos.exit_date = today_str
+                pos.exit_price = exit_price
+                pos.exit_reason = "RECONCILED_LIVE_EXIT"
+                pos.pnl = pnl
+                pos.pnl_pct = pnl_pct
+                persist_stock_exit(pos.id, today_str, exit_price, "RECONCILED_LIVE_EXIT", pnl, pnl_pct, pos.peak_pnl_pct)
+                engine.closed_positions.append(pos)
+                del engine.open_positions[symbol]
+                reconciled_exits.append(f"{pool}:{symbol} @ {exit_price}")
+            elif pos.entry_date == today_str and buy_status.get(symbol) == "complete":
+                # BUY genuinely filled today (order book confirms it) --
+                # its absence from holdings is just T+1 settlement lag, not
+                # a real problem. Leave OPEN; holdings will show it tomorrow.
+                continue
+            elif pos.entry_date == today_str and buy_status.get(symbol) in ("rejected", "cancelled"):
+                # BUY genuinely never filled today -- safe to close.
+                pos.status = "CLOSED"
+                pos.exit_date = today_str
+                pos.exit_price = pos.entry_price
+                pos.exit_reason = "RECONCILED_NOT_FILLED"
+                pos.pnl = 0.0
+                pos.pnl_pct = 0.0
+                persist_stock_exit(pos.id, today_str, pos.entry_price, "RECONCILED_NOT_FILLED", 0.0, 0.0, pos.peak_pnl_pct)
+                engine.closed_positions.append(pos)
+                del engine.open_positions[symbol]
+                removed.append(f"{pool}:{symbol}")
+            elif pos.entry_date == today_str:
+                # Order still in flight (open/pending) or no matching order
+                # found in today's book at all -- don't guess, re-check next run.
+                continue
+            else:
+                # Older position, no holding, no confirming SELL in today's
+                # order book -- ambiguous. Could be a real exit from a day
+                # reconcile didn't run, or a BUY that never filled in the
+                # first place and has sat OPEN undetected since. Upstox's
+                # order book is today-only so neither can be verified here.
+                # Never guess a price either way -- flag for manual review
+                # and leave the DB record untouched.
+                ambiguous.append(f"{pool}:{symbol} (DB qty {pos.quantity}, entered {pos.entry_date})")
 
     untracked = sorted(
         symbol for symbol, qty in held_qty.items()
@@ -405,14 +515,22 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
         else:
             print(f"⚠️ [Reconcile] GTT cancel failed for {symbol} {gtt_id}: {res.reason}")
 
-    if removed or untracked or cancelled_gtt:
+    if removed or reconciled_exits or ambiguous or untracked or cancelled_gtt:
         lines = ["[RECONCILE] Positional stocks vs Upstox holdings"]
         if removed:
             lines.append("Removed (never filled, DB corrected): " + ", ".join(removed))
+        if reconciled_exits:
+            lines.append("Sold at broker but DB still showed OPEN -- closed with recovered PnL: "
+                          + ", ".join(reconciled_exits))
+        if ambiguous:
+            lines.append("⚠️ DB shows OPEN but broker doesn't hold it, and no confirming SELL in "
+                         "today's order book -- can't tell if never filled or sold on an earlier "
+                         "day. NOT auto-corrected, needs manual check: " + ", ".join(ambiguous))
         if untracked:
             lines.append("Held at broker but untracked by any pool (manual?): " + ", ".join(untracked))
         if cancelled_gtt:
             lines.append("Orphaned GTT stops cancelled: " + ", ".join(cancelled_gtt))
         await notifier.send_message("\n".join(lines))
 
-    return {"ran": True, "removed": removed, "untracked": untracked, "cancelled_gtt": cancelled_gtt}
+    return {"ran": True, "removed": removed, "reconciled_exits": reconciled_exits,
+            "ambiguous": ambiguous, "untracked": untracked, "cancelled_gtt": cancelled_gtt}

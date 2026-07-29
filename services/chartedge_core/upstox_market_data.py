@@ -26,6 +26,8 @@ LTP_PATH = "/market-quote/ltp"
 OPTION_CHAIN_PATH = "/option/chain"
 OPTION_CONTRACT_PATH = "/option/contract"
 HOLDINGS_PATH = "/portfolio/long-term-holdings"
+POSITIONS_PATH = "/portfolio/short-term-positions"
+ORDER_BOOK_PATH = "/order/retrieve-all"
 
 
 def _api_base(broker) -> str:
@@ -57,6 +59,51 @@ def fetch_holdings(broker, token: str) -> list[dict[str, Any]]:
         return resp.json().get("data", []) or []
     except Exception as e:
         print(f"⚠️ [Positional/Upstox] holdings fetch failed: {e}")
+        return []
+
+
+def fetch_order_book(broker, token: str) -> list[dict[str, Any]]:
+    """Today's order book (all statuses) from Upstox -- used by
+    positional_stocks_runtime.reconcile_stock_positions to recover the real
+    fill price of a SELL that happened outside our own exit path (a GTT
+    stop-loss trigger, or a manual sell) so the DB can be closed with the
+    true PnL instead of a zeroed-out placeholder. Each row carries
+    trading_symbol / transaction_type / status / average_price /
+    filled_quantity. Returns [] on any HTTP/parse failure, same convention
+    as fetch_holdings."""
+    try:
+        resp = requests.get(
+            f"{_api_base(broker)}{ORDER_BOOK_PATH}",
+            headers=_headers(token), timeout=15,
+        )
+        if resp.status_code != 200:
+            print(f"⚠️ [Positional/Upstox] order book HTTP {resp.status_code}: {resp.text[:200]}")
+            return []
+        return resp.json().get("data", []) or []
+    except Exception as e:
+        print(f"⚠️ [Positional/Upstox] order book fetch failed: {e}")
+        return []
+
+
+def fetch_fo_positions(broker, token: str) -> list[dict[str, Any]]:
+    """Actual open F&O (and intraday equity) positions from Upstox -- the
+    broker's real derivatives book. Used by the weekly-options reconciliation
+    job (positional_runtime.reconcile_options_position) to detect paper/live
+    divergence: a paper condor with no live legs behind it, or live legs
+    still open after the paper trade closed (failed exit basket). Each row
+    carries trading_symbol / instrument_token / quantity (net signed).
+    Returns [] on any HTTP/parse failure, same convention as fetch_holdings."""
+    try:
+        resp = requests.get(
+            f"{_api_base(broker)}{POSITIONS_PATH}",
+            headers=_headers(token), timeout=15,
+        )
+        if resp.status_code != 200:
+            print(f"⚠️ [Positional/Upstox] positions HTTP {resp.status_code}: {resp.text[:200]}")
+            return []
+        return resp.json().get("data", []) or []
+    except Exception as e:
+        print(f"⚠️ [Positional/Upstox] positions fetch failed: {e}")
         return []
 
 

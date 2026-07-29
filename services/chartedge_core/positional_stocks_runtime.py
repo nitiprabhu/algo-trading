@@ -375,6 +375,27 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
         total_value, total_qty = sell_fill.get(symbol, (0.0, 0))
         sell_fill[symbol] = (total_value + avg_price * qty, total_qty + qty)
 
+    # Today's BUY order status per symbol. Needed because
+    # /portfolio/long-term-holdings reflects T+1 SETTLED holdings -- a stock
+    # bought today never appears there until tomorrow regardless of whether
+    # the buy actually succeeded. Checking held_qty alone for a same-day
+    # entry would wrongly close every genuinely-filled same-day BUY too, not
+    # just failed ones (this bit us for real: ADANIENSOL/FEDERALBNK/others
+    # got zeroed out this way before this fix). "complete" -> really filled,
+    # keep OPEN even though holdings won't show it until tomorrow.
+    # "rejected"/"cancelled" -> genuinely never filled, safe to close.
+    # Anything else (open/trigger pending/etc) -> still in flight, leave
+    # alone and re-check next run.
+    buy_status: dict[str, str] = {}
+    for o in orders:
+        symbol = o.get("trading_symbol") or o.get("tradingsymbol")
+        if not symbol or o.get("transaction_type") != "BUY":
+            continue
+        status = (o.get("status") or "").lower()
+        # complete takes priority over any other status seen for the symbol
+        if status == "complete" or buy_status.get(symbol) != "complete":
+            buy_status[symbol] = status
+
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
     removed: list[str] = []
     reconciled_exits: list[str] = []
@@ -409,11 +430,13 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
                 engine.closed_positions.append(pos)
                 del engine.open_positions[symbol]
                 reconciled_exits.append(f"{pool}:{symbol} @ {exit_price}")
-            elif pos.entry_date == today_str:
-                # Entered today with no confirming SELL and no holding --
-                # the order book only covers today, so for a same-day entry
-                # its absence there too means the BUY itself never settled.
-                # Low ambiguity: safe to auto-close as never-filled.
+            elif pos.entry_date == today_str and buy_status.get(symbol) == "complete":
+                # BUY genuinely filled today (order book confirms it) --
+                # its absence from holdings is just T+1 settlement lag, not
+                # a real problem. Leave OPEN; holdings will show it tomorrow.
+                continue
+            elif pos.entry_date == today_str and buy_status.get(symbol) in ("rejected", "cancelled"):
+                # BUY genuinely never filled today -- safe to close.
                 pos.status = "CLOSED"
                 pos.exit_date = today_str
                 pos.exit_price = pos.entry_price
@@ -424,6 +447,10 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
                 engine.closed_positions.append(pos)
                 del engine.open_positions[symbol]
                 removed.append(f"{pool}:{symbol}")
+            elif pos.entry_date == today_str:
+                # Order still in flight (open/pending) or no matching order
+                # found in today's book at all -- don't guess, re-check next run.
+                continue
             else:
                 # Older position, no holding, no confirming SELL in today's
                 # order book -- ambiguous. Could be a real exit from a day

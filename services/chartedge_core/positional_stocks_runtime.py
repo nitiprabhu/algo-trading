@@ -343,7 +343,7 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
     Upstox token; a stale/missing token is a no-op (never guess)."""
     from services.chartedge_core.database import persist_stock_exit
     from services.chartedge_core.upstox_broker import live_broker
-    from services.chartedge_core.upstox_market_data import fetch_holdings, fetch_order_book, fetch_ltp
+    from services.chartedge_core.upstox_market_data import fetch_holdings, fetch_order_book
     from services.chartedge_core.telegram import notifier
 
     broker = live_broker()
@@ -378,6 +378,7 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
     removed: list[str] = []
     reconciled_exits: list[str] = []
+    ambiguous: list[str] = []
     tracked_symbols: set[str] = set()
 
     for pool, engine in engines.items():
@@ -387,46 +388,51 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
             if held_qty.get(symbol, 0) >= pos.quantity:
                 continue  # broker confirms this quantity is genuinely held
 
-            if pos.entry_date == today_str:
-                # Entered today -- broker's own place_entry() already
-                # confirmed the fill before this position was committed
-                # (see _confirm_live_entry), so missing from holdings here
-                # means the order was accepted but genuinely never settled.
-                exit_price, exit_reason, pnl, pnl_pct = pos.entry_price, "RECONCILED_NOT_FILLED", 0.0, 0.0
-                removed.append(f"{pool}:{symbol}")
-            else:
-                # Was held on a prior day and is now gone from the broker
-                # book: a real SELL happened outside our own exit path (GTT
-                # stop-loss trigger, manual sell, or a live_exit() that fired
-                # but silently failed to notify) and the DB never learned
-                # about it. Recover the true fill price instead of zeroing
-                # PnL for what was an actual trade.
-                if symbol in sell_fill:
-                    total_value, total_qty = sell_fill[symbol]
-                    exit_price = round(total_value / total_qty, 2)
-                    exit_reason = "RECONCILED_LIVE_EXIT"
-                else:
-                    # No matching order in today's book (GTT may have
-                    # triggered on an earlier day, or the order-book fetch
-                    # failed) -- fall back to current LTP as a best-effort
-                    # price rather than lying with a zero-PnL close.
-                    instrument = broker.instrument_keys.get(symbol)
-                    ltp = fetch_ltp(broker, token, instrument) if instrument else None
-                    exit_price = ltp if ltp is not None else pos.entry_price
-                    exit_reason = "RECONCILED_LIVE_EXIT_ESTIMATED" if ltp is not None else "RECONCILED_LIVE_EXIT_UNKNOWN_PRICE"
+            if symbol in sell_fill:
+                # Today's order book positively confirms a completed SELL --
+                # a real exit happened outside our own exit path (GTT stop
+                # trigger, manual sell, or a live_exit() that fired but
+                # silently failed to notify) and the DB never learned about
+                # it. This is the only case we trust enough to auto-close
+                # with a computed price, because we have direct evidence.
+                total_value, total_qty = sell_fill[symbol]
+                exit_price = round(total_value / total_qty, 2)
                 pnl = round((exit_price - pos.entry_price) * pos.quantity, 2)
                 pnl_pct = round((exit_price - pos.entry_price) / pos.entry_price * 100, 2) if pos.entry_price else 0.0
-                reconciled_exits.append(f"{pool}:{symbol} @ {exit_price} ({exit_reason})")
-
-            pos.status = "CLOSED"
-            pos.exit_date = today_str
-            pos.exit_price = exit_price
-            pos.exit_reason = exit_reason
-            pos.pnl = pnl
-            pos.pnl_pct = pnl_pct
-            persist_stock_exit(pos.id, today_str, exit_price, exit_reason, pnl, pnl_pct, pos.peak_pnl_pct)
-            engine.closed_positions.append(pos)
-            del engine.open_positions[symbol]
+                pos.status = "CLOSED"
+                pos.exit_date = today_str
+                pos.exit_price = exit_price
+                pos.exit_reason = "RECONCILED_LIVE_EXIT"
+                pos.pnl = pnl
+                pos.pnl_pct = pnl_pct
+                persist_stock_exit(pos.id, today_str, exit_price, "RECONCILED_LIVE_EXIT", pnl, pnl_pct, pos.peak_pnl_pct)
+                engine.closed_positions.append(pos)
+                del engine.open_positions[symbol]
+                reconciled_exits.append(f"{pool}:{symbol} @ {exit_price}")
+            elif pos.entry_date == today_str:
+                # Entered today with no confirming SELL and no holding --
+                # the order book only covers today, so for a same-day entry
+                # its absence there too means the BUY itself never settled.
+                # Low ambiguity: safe to auto-close as never-filled.
+                pos.status = "CLOSED"
+                pos.exit_date = today_str
+                pos.exit_price = pos.entry_price
+                pos.exit_reason = "RECONCILED_NOT_FILLED"
+                pos.pnl = 0.0
+                pos.pnl_pct = 0.0
+                persist_stock_exit(pos.id, today_str, pos.entry_price, "RECONCILED_NOT_FILLED", 0.0, 0.0, pos.peak_pnl_pct)
+                engine.closed_positions.append(pos)
+                del engine.open_positions[symbol]
+                removed.append(f"{pool}:{symbol}")
+            else:
+                # Older position, no holding, no confirming SELL in today's
+                # order book -- ambiguous. Could be a real exit from a day
+                # reconcile didn't run, or a BUY that never filled in the
+                # first place and has sat OPEN undetected since. Upstox's
+                # order book is today-only so neither can be verified here.
+                # Never guess a price either way -- flag for manual review
+                # and leave the DB record untouched.
+                ambiguous.append(f"{pool}:{symbol} (DB qty {pos.quantity}, entered {pos.entry_date})")
 
     untracked = sorted(
         symbol for symbol, qty in held_qty.items()
@@ -454,13 +460,17 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
         else:
             print(f"⚠️ [Reconcile] GTT cancel failed for {symbol} {gtt_id}: {res.reason}")
 
-    if removed or reconciled_exits or untracked or cancelled_gtt:
+    if removed or reconciled_exits or ambiguous or untracked or cancelled_gtt:
         lines = ["[RECONCILE] Positional stocks vs Upstox holdings"]
         if removed:
             lines.append("Removed (never filled, DB corrected): " + ", ".join(removed))
         if reconciled_exits:
             lines.append("Sold at broker but DB still showed OPEN -- closed with recovered PnL: "
                           + ", ".join(reconciled_exits))
+        if ambiguous:
+            lines.append("⚠️ DB shows OPEN but broker doesn't hold it, and no confirming SELL in "
+                         "today's order book -- can't tell if never filled or sold on an earlier "
+                         "day. NOT auto-corrected, needs manual check: " + ", ".join(ambiguous))
         if untracked:
             lines.append("Held at broker but untracked by any pool (manual?): " + ", ".join(untracked))
         if cancelled_gtt:
@@ -468,4 +478,4 @@ async def reconcile_stock_positions(engines: dict[str, "PositionalStocksEngine"]
         await notifier.send_message("\n".join(lines))
 
     return {"ran": True, "removed": removed, "reconciled_exits": reconciled_exits,
-            "untracked": untracked, "cancelled_gtt": cancelled_gtt}
+            "ambiguous": ambiguous, "untracked": untracked, "cancelled_gtt": cancelled_gtt}

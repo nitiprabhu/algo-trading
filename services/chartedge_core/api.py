@@ -95,6 +95,7 @@ if _positional_stocks_cfg.get("enabled", False):
         max_positions=_positional_stocks_cfg.get("max_positions", 4),
         stop_loss_pct=_positional_stocks_cfg.get("stop_loss_pct", 6.0),
         target_pct=_positional_stocks_cfg.get("target_pct", 12.0),
+        reentry_cooldown_sessions=_positional_stocks_cfg.get("reentry_cooldown_sessions", 0),
     )
     positional_stocks_runtime_wrapper = PositionalStocksRuntime(positional_stocks_engine, _positional_stocks_cfg)
     print("DEBUG: Positional stocks engine enabled")
@@ -116,6 +117,7 @@ if _positional_stocks_midcap_cfg.get("enabled", False):
         target_pct=_positional_stocks_midcap_cfg.get("target_pct", 12.0),
         pool="midcap",
         confidence_sizing=_positional_stocks_midcap_cfg.get("confidence_sizing", False),
+        reentry_cooldown_sessions=_positional_stocks_midcap_cfg.get("reentry_cooldown_sessions", 0),
     )
     positional_stocks_midcap_runtime_wrapper = PositionalStocksRuntime(
         positional_stocks_midcap_engine, _positional_stocks_midcap_cfg
@@ -141,6 +143,7 @@ if _positional_stocks_smallcap_cfg.get("enabled", False):
         target_pct=_positional_stocks_smallcap_cfg.get("target_pct", 12.0),
         pool="smallcap",
         confidence_sizing=_positional_stocks_smallcap_cfg.get("confidence_sizing", False),
+        reentry_cooldown_sessions=_positional_stocks_smallcap_cfg.get("reentry_cooldown_sessions", 0),
     )
     positional_stocks_smallcap_runtime_wrapper = PositionalStocksRuntime(
         positional_stocks_smallcap_engine, _positional_stocks_smallcap_cfg

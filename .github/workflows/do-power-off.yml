@@ -1,9 +1,10 @@
 name: Power Off Droplet
 
-on:
-  schedule:
-    - cron: '30 10 * * *'  # 10:30 AM UTC (4:00 PM IST), Every day
-  workflow_dispatch: {}
+# Scheduled execution is now handled natively by DigitalOcean Serverless Functions (04:00 PM IST).
+# GitHub Actions schedule is commented out to avoid duplicate triggers.
+# schedule:
+#   - cron: '30 10 * * *'
+workflow_dispatch: {}
 
 jobs:
   power_off:

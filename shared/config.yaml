@@ -221,6 +221,7 @@ positional_stocks_risk:
   trail_keep_frac: 0.5    # trailing stop locks in 50% of peak gain once armed
   yfinance_period: "2y"   # daily bars pulled per check; 2y gives Golden Cross/Cup&Handle enough history
   symbols: [SBIN, ADANIENT, VEDL, ONGC, HINDALCO]  # top 5 by 12mo backtest CAGR (22.69%)
+  reentry_cooldown_sessions: 2  # wait 2 trading sessions before re-entering an exited symbol
   check_after_time: "15:00"  # IST cutoff -- runs once per day after this time, not every 5 min
 
 positional_stocks_midcap_risk:
@@ -263,6 +264,7 @@ positional_stocks_midcap_risk:
   trail_keep_frac: 0.5
   yfinance_period: "2y"
   symbols: [LAURUSLABS, "M&MFIN", ASHOKLEY, IDEA, ADANIENSOL, MUTHOOTFIN, FEDERALBNK, NYKAA]
+  reentry_cooldown_sessions: 2  # wait 2 trading sessions before re-entering an exited symbol
   check_after_time: "15:00"
 
 positional_stocks_smallcap_risk:
@@ -304,6 +306,7 @@ positional_stocks_smallcap_risk:
   trail_keep_frac: 0.5
   yfinance_period: "2y"
   symbols: [BGRENERGY, STLTECH, AXISCADES, HFCL, NATIONALUM, SOLARINDS, HINDCOPPER, DIACABS, INDIGRID, APCOTEXIND]
+  reentry_cooldown_sessions: 2  # wait 2 trading sessions before re-entering an exited symbol
   check_after_time: "15:00"
 
 futures_risk:
@@ -391,13 +394,11 @@ live_trading:
   gtt_stop_pct: 4.0         # server-side GTT stop-loss %, matches engine stop_loss_pct.
                             # Lives on Upstox independent of the daily token -- protects
                             # open positions even if the daily approval is forgotten.
-  reserve_for_options: 120000.0  # funds floor stock-pool BUYs must never dip below --
-                            # keeps the weekly condor's margin (~71.6k confirmed
-                            # 2026-07-28, buffer to 1.2L) safe from the stock pools'
-                            # own funds check, which otherwise treats the whole
-                            # account balance as spendable. See upstox_broker.py
-                            # place_entry() and upstox_options_broker.py's
-                            # COMMON-POOL FUNDS docstring.
+  reserve_for_options: 50000.0   # funds floor stock-pool BUYs must never dip below --
+                            # keeps the weekly condor's margin (~50k cap) safe from the stock pools'
+                            # own funds check, leaving remaining balance (~70k) available for
+                            # positional stocks. See upstox_broker.py place_entry() and
+                            # upstox_options_broker.py's COMMON-POOL FUNDS docstring.
   # NO gtt target leg by design: a server-side target would force an exit while
   # re-entry needs the (possibly absent) token -> manufactured missed opportunity.
   # Targets/trailing/sell-signal stay dynamic in the engine.

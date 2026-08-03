@@ -25,7 +25,7 @@ a symbol has accumulated enough daily bars, since indstocks.py only seeds
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from statistics import mean
 from typing import Optional, Sequence
 from uuid import uuid4
@@ -269,7 +269,7 @@ class PositionalStocksEngine:
 
     def __init__(self, capital: float = 100000.0, max_positions: int = 4,
                  stop_loss_pct: float = 6.0, target_pct: float = 12.0, pool: str = "largecap",
-                 confidence_sizing: bool = False):
+                 confidence_sizing: bool = False, reentry_cooldown_sessions: int = 0):
         from services.chartedge_core.database import create_db_and_tables
         create_db_and_tables()  # idempotent CREATE TABLE IF NOT EXISTS; ensures StockPositionRecord exists
         self.capital = capital
@@ -281,6 +281,8 @@ class PositionalStocksEngine:
         # instead of a fixed capital/max_positions slot per name -- stronger signals get
         # a bigger allocation, capped by remaining deployable capital in the pool.
         self.confidence_sizing = confidence_sizing
+        self.reentry_cooldown_sessions = reentry_cooldown_sessions
+        self.last_exit_dates: dict[str, date] = {}
         self.open_positions: dict[str, StockPosition] = {}
         self.closed_positions: list[StockPosition] = []
         self._load()
@@ -300,6 +302,20 @@ class PositionalStocksEngine:
                 exit_date=rec.exit_date, exit_price=rec.exit_price,
                 exit_reason=rec.exit_reason, pnl=rec.pnl, pnl_pct=rec.pnl_pct,
             ))
+            if rec.exit_date:
+                try:
+                    if isinstance(rec.exit_date, str):
+                        exit_d = datetime.strptime(rec.exit_date, "%Y-%m-%d").date()
+                    elif isinstance(rec.exit_date, date):
+                        exit_d = rec.exit_date
+                    else:
+                        exit_d = None
+                    if exit_d:
+                        prev = self.last_exit_dates.get(rec.symbol)
+                        if prev is None or exit_d > prev:
+                            self.last_exit_dates[rec.symbol] = exit_d
+                except Exception:
+                    pass
 
     def slot_capital(self) -> float:
         return self.capital / self.max_positions
@@ -320,6 +336,29 @@ class PositionalStocksEngine:
         desired = self.slot_capital() * multiplier
         return min(desired, available)
 
+    def is_in_cooldown(self, symbol: str, today: date) -> bool:
+        """Check if symbol is currently in a post-exit cooldown period.
+        Counts trading days (Monday-Friday) elapsed since the last exit date.
+        Returns True if fewer than reentry_cooldown_sessions trading days have elapsed.
+        """
+        from datetime import timedelta
+        if self.reentry_cooldown_sessions <= 0:
+            return False
+        last_exit = self.last_exit_dates.get(symbol)
+        if last_exit is None:
+            return False
+        if today <= last_exit:
+            return True  # Same day or past date
+        
+        elapsed_trading_days = 0
+        cur = last_exit + timedelta(days=1)
+        while cur <= today:
+            if cur.weekday() < 5:  # Monday = 0, Friday = 4
+                elapsed_trading_days += 1
+            cur += timedelta(days=1)
+        
+        return elapsed_trading_days < self.reentry_cooldown_sessions
+
     def build_entry_candidate(self, symbol: str, today: date, price: float, score: float,
                                buy_threshold: float, adx_value: float, min_adx: float = 25.0,
                                trend_confirmed: bool = True) -> Optional[StockPosition]:
@@ -331,7 +370,10 @@ class PositionalStocksEngine:
         ribbon and Supertrend independently bullish) on top of the weighted
         confluence score -- backtested to matter: without it, 12mo/4-stock
         return was -1.3%; with it (+ wider universe), +9.8%."""
+        from uuid import uuid4
         if symbol in self.open_positions:
+            return None
+        if self.is_in_cooldown(symbol, today):
             return None
         if len(self.open_positions) >= self.max_positions:
             return None
@@ -425,6 +467,7 @@ class PositionalStocksEngine:
         from services.chartedge_core.database import persist_stock_exit
         persist_stock_exit(pos.id, pos.exit_date, pos.exit_price, pos.exit_reason, pos.pnl, pos.pnl_pct, pos.peak_pnl_pct)
 
+        self.last_exit_dates[symbol] = today
         self.closed_positions.append(pos)
         del self.open_positions[symbol]
         return pos
@@ -445,6 +488,8 @@ class PositionalStocksEngine:
         the freed capital into the new signal. Returns (closed_position,
         new_position) on a rotation, or None if no rotation happened."""
         if symbol in self.open_positions or not self.open_positions:
+            return None
+        if self.is_in_cooldown(symbol, today):
             return None
 
         candidates = [

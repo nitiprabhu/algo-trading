@@ -1,0 +1,26 @@
+targetNamespace: ''
+parameters: {}
+packages:
+  - name: droplet-scheduler
+    environment:
+      DO_API_TOKEN: "${DO_API_TOKEN}"
+      DROPLET_ID: "${DROPLET_ID}"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID}"
+    functions:
+      - name: power-on
+        runtime: python:default
+        web: true
+        triggers:
+          - name: power-on-weekday-morning
+            sourceType: scheduler
+            sourceDetails:
+              cron: "0 3 * * 1-5"  # 03:00 UTC = 08:30 AM IST, Mon-Fri (Trading Days)
+      - name: power-off
+        runtime: python:default
+        web: true
+        triggers:
+          - name: power-off-daily-evening
+            sourceType: scheduler
+            sourceDetails:
+              cron: "30 10 * * *" # 10:30 UTC = 04:00 PM IST, Every Day

@@ -1,9 +1,10 @@
 name: Power On Droplet
 
-on:
-  schedule:
-    - cron: '30 1 * * 1-5'  # 1:30 AM UTC (7:00 AM IST), Mon-Fri -- fired early, GH Actions scheduled runs lag ~2h
-  workflow_dispatch: {}
+# Scheduled execution is now handled natively by DigitalOcean Serverless Functions (08:30 AM IST).
+# GitHub Actions schedule is commented out to avoid duplicate triggers.
+# schedule:
+#   - cron: '30 1 * * 1-5'
+workflow_dispatch: {}
 
 jobs:
   power_on:

@@ -47,7 +47,13 @@ class StockPosition:
     entry_date: str
     entry_price: float
     quantity: int
+    initial_quantity: Optional[int] = None  # quantity before any partial exit
     status: str = "OPEN"  # OPEN or CLOSED
+    partial_exit_done: bool = False  # True once Target 1 (+14%) 50% exit has occurred
+    partial_exit_date: Optional[str] = None
+    partial_exit_price: Optional[float] = None
+    partial_exit_qty: Optional[int] = None
+    partial_pnl: float = 0.0
     exit_date: Optional[str] = None
     exit_price: Optional[float] = None
     exit_reason: Optional[str] = None
@@ -55,8 +61,42 @@ class StockPosition:
     pnl_pct: float = 0.0
     peak_pnl_pct: float = 0.0  # tracks best PnL% seen, drives the trailing stop
 
+    def __post_init__(self):
+        if self.initial_quantity is None:
+            self.initial_quantity = self.quantity
+
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class StockExitEvent:
+    """Represents an exit action (either 50% partial profit booking or final close)."""
+    symbol: str
+    position: StockPosition
+    is_partial: bool  # True for 50% Target 1 exit; False for final/full close
+    exit_qty: int
+    exit_price: float
+    exit_reason: str
+    pnl: float
+    pnl_pct: float
+    total_pnl: float
+
+    @property
+    def id(self) -> str:
+        return self.position.id
+
+    @property
+    def quantity(self) -> int:
+        return self.exit_qty
+
+    @property
+    def entry_price(self) -> float:
+        return self.position.entry_price
+
+    @property
+    def status(self) -> str:
+        return self.position.status
 
 
 def daily_candles_from_1m(candles: Sequence[Candle]) -> list[Candle]:
@@ -268,8 +308,9 @@ class PositionalStocksEngine:
     unlike the single-open-trade weekly options module."""
 
     def __init__(self, capital: float = 100000.0, max_positions: int = 4,
-                 stop_loss_pct: float = 6.0, target_pct: float = 12.0, pool: str = "largecap",
-                 confidence_sizing: bool = False, reentry_cooldown_sessions: int = 0):
+                 stop_loss_pct: float = 6.0, target_pct: float = 14.0, pool: str = "largecap",
+                 confidence_sizing: bool = False, reentry_cooldown_sessions: int = 0,
+                 partial_exit_frac: float = 0.5, enable_runner_phase: bool = True):
         from services.chartedge_core.database import create_db_and_tables
         create_db_and_tables()  # idempotent CREATE TABLE IF NOT EXISTS; ensures StockPositionRecord exists
         self.capital = capital
@@ -282,6 +323,8 @@ class PositionalStocksEngine:
         # a bigger allocation, capped by remaining deployable capital in the pool.
         self.confidence_sizing = confidence_sizing
         self.reentry_cooldown_sessions = reentry_cooldown_sessions
+        self.partial_exit_frac = partial_exit_frac
+        self.enable_runner_phase = enable_runner_phase
         self.last_exit_dates: dict[str, date] = {}
         self.open_positions: dict[str, StockPosition] = {}
         self.closed_positions: list[StockPosition] = []
@@ -292,15 +335,31 @@ class PositionalStocksEngine:
         for rec in get_open_stock_positions(pool=self.pool):
             pos = StockPosition(
                 id=rec.position_id, symbol=rec.symbol, entry_date=rec.entry_date,
-                entry_price=rec.entry_price, quantity=rec.quantity, status=rec.status,
+                entry_price=rec.entry_price, quantity=rec.quantity,
+                initial_quantity=getattr(rec, "initial_quantity", None) or rec.quantity,
+                status=rec.status,
+                partial_exit_done=bool(getattr(rec, "partial_exit_done", False)),
+                partial_exit_date=getattr(rec, "partial_exit_date", None),
+                partial_exit_price=getattr(rec, "partial_exit_price", None),
+                partial_exit_qty=getattr(rec, "partial_exit_qty", None),
+                partial_pnl=getattr(rec, "partial_pnl", 0.0) or 0.0,
+                peak_pnl_pct=getattr(rec, "peak_pnl_pct", 0.0) or 0.0,
             )
             self.open_positions[rec.symbol] = pos
         for rec in get_closed_stock_positions(pool=self.pool):
             self.closed_positions.append(StockPosition(
                 id=rec.position_id, symbol=rec.symbol, entry_date=rec.entry_date,
-                entry_price=rec.entry_price, quantity=rec.quantity, status=rec.status,
+                entry_price=rec.entry_price, quantity=rec.quantity,
+                initial_quantity=getattr(rec, "initial_quantity", None) or rec.quantity,
+                status=rec.status,
+                partial_exit_done=bool(getattr(rec, "partial_exit_done", False)),
+                partial_exit_date=getattr(rec, "partial_exit_date", None),
+                partial_exit_price=getattr(rec, "partial_exit_price", None),
+                partial_exit_qty=getattr(rec, "partial_exit_qty", None),
+                partial_pnl=getattr(rec, "partial_pnl", 0.0) or 0.0,
                 exit_date=rec.exit_date, exit_price=rec.exit_price,
                 exit_reason=rec.exit_reason, pnl=rec.pnl, pnl_pct=rec.pnl_pct,
+                peak_pnl_pct=getattr(rec, "peak_pnl_pct", 0.0) or 0.0,
             ))
             if rec.exit_date:
                 try:
@@ -341,7 +400,6 @@ class PositionalStocksEngine:
         Counts trading days (Monday-Friday) elapsed since the last exit date.
         Returns True if fewer than reentry_cooldown_sessions trading days have elapsed.
         """
-        from datetime import timedelta
         if self.reentry_cooldown_sessions <= 0:
             return False
         last_exit = self.last_exit_dates.get(symbol)
@@ -370,7 +428,6 @@ class PositionalStocksEngine:
         ribbon and Supertrend independently bullish) on top of the weighted
         confluence score -- backtested to matter: without it, 12mo/4-stock
         return was -1.3%; with it (+ wider universe), +9.8%."""
-        from uuid import uuid4
         if symbol in self.open_positions:
             return None
         if self.is_in_cooldown(symbol, today):
@@ -391,7 +448,7 @@ class PositionalStocksEngine:
 
         return StockPosition(
             id=str(uuid4()), symbol=symbol, entry_date=today.strftime("%Y-%m-%d"),
-            entry_price=round(price, 2), quantity=quantity,
+            entry_price=round(price, 2), quantity=quantity, initial_quantity=quantity,
         )
 
     def commit_entry(self, position: StockPosition) -> None:
@@ -419,32 +476,87 @@ class PositionalStocksEngine:
 
     def check_exit(self, symbol: str, today: date, price: float, score: float,
                     sell_threshold: float, trail_arm_pct: float = 3.0,
-                    trail_keep_frac: float = 0.5) -> Optional[StockPosition]:
-        """Closes an existing BUY position only. Never opens a short.
-        Once a position's peak gain reaches trail_arm_pct, the position
-        stops trusting weak SELL_SIGNAL exits and switches to a trailing
-        stop that locks in trail_keep_frac of the peak gain -- lets winners
-        run instead of bailing at the first bearish confluence flip."""
+                    trail_keep_frac: float = 0.5) -> Optional[StockExitEvent]:
+        """Evaluates exit conditions for an existing BUY position.
+        
+        2-Stage Architecture:
+        1. Target 1 (+14% Gain): Sells 50% of the position (quantity // 2).
+        2. Runner Phase (Remaining 50%): Stop-loss floor is locked at +14% (guaranteeing
+           minimum +14% overall gain). Dynamic trailing stop moves higher with peak gains.
+           Exits remaining shares on RUNNER_PROFIT_LOCK, RUNNER_TRAILING_STOP, or RUNNER_TREND_EXIT.
+        """
         pos = self.open_positions.get(symbol)
         if pos is None:
             return None
 
         pnl_pct = (price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price else 0
         pos.peak_pnl_pct = max(pos.peak_pnl_pct, pnl_pct)
-        trail_armed = pos.peak_pnl_pct >= trail_arm_pct
 
+        # ── STAGE 2: RUNNER PHASE ─────────────────────────────────────────────
+        if pos.partial_exit_done:
+            # Runner stop-loss floor is locked at target_pct (e.g. +14.0%).
+            # Trailing stop also locks in trail_keep_frac of peak gain once above target_pct.
+            runner_floor = max(self.target_pct, pos.peak_pnl_pct * trail_keep_frac)
+            reason = None
+            if pnl_pct <= runner_floor:
+                reason = "RUNNER_PROFIT_LOCK" if runner_floor == self.target_pct else "RUNNER_TRAILING_STOP"
+            elif score <= sell_threshold:
+                reason = "RUNNER_TREND_EXIT"
+
+            if reason is None:
+                return None
+            return self._finalize_close(symbol, today, price, reason)
+
+        # ── STAGE 1: NORMAL PHASE / TARGET 1 CHECK ───────────────────────────
+        # Check Target 1 (+14% by default)
+        if pnl_pct >= self.target_pct:
+            if self.enable_runner_phase and pos.quantity > 1:
+                # Execute 50% partial exit
+                exit_qty = max(1, int(round(pos.quantity * self.partial_exit_frac)))
+                if exit_qty >= pos.quantity:
+                    exit_qty = pos.quantity - 1  # ensure at least 1 runner share
+                remaining_qty = pos.quantity - exit_qty
+                partial_pnl = round((price - pos.entry_price) * exit_qty, 2)
+
+                pos.initial_quantity = pos.initial_quantity or pos.quantity
+                pos.partial_exit_done = True
+                pos.partial_exit_date = today.strftime("%Y-%m-%d")
+                pos.partial_exit_price = round(price, 2)
+                pos.partial_exit_qty = exit_qty
+                pos.partial_pnl = partial_pnl
+                pos.quantity = remaining_qty
+
+                from services.chartedge_core.database import persist_stock_partial_exit
+                persist_stock_partial_exit(
+                    pos.id, pos.partial_exit_date, pos.partial_exit_price,
+                    exit_qty, partial_pnl, remaining_qty
+                )
+
+                return StockExitEvent(
+                    symbol=symbol,
+                    position=pos,
+                    is_partial=True,
+                    exit_qty=exit_qty,
+                    exit_price=round(price, 2),
+                    exit_reason="PARTIAL_TARGET_14PCT",
+                    pnl=partial_pnl,
+                    pnl_pct=round(pnl_pct, 2),
+                    total_pnl=partial_pnl,
+                )
+            else:
+                # Single share (quantity=1) or runner phase disabled -> 100% exit at target
+                return self._finalize_close(symbol, today, price, "TARGET")
+
+        # Standard Pre-Target Protection
+        trail_armed = pos.peak_pnl_pct >= trail_arm_pct
         reason = None
         if trail_armed:
             trail_floor = pos.peak_pnl_pct * trail_keep_frac
             if pnl_pct <= trail_floor:
                 reason = "TRAILING_STOP"
-            elif pnl_pct >= self.target_pct:
-                reason = "TARGET"
         else:
             if pnl_pct <= -self.stop_loss_pct:
                 reason = "STOP_LOSS"
-            elif pnl_pct >= self.target_pct:
-                reason = "TARGET"
             elif score <= sell_threshold:
                 reason = "SELL_SIGNAL"
 
@@ -453,15 +565,19 @@ class PositionalStocksEngine:
 
         return self._finalize_close(symbol, today, price, reason)
 
-    def _finalize_close(self, symbol: str, today: date, price: float, reason: str) -> StockPosition:
+    def _finalize_close(self, symbol: str, today: date, price: float, reason: str) -> StockExitEvent:
         pos = self.open_positions[symbol]
         pnl_pct = (price - pos.entry_price) / pos.entry_price * 100 if pos.entry_price else 0
         pos.peak_pnl_pct = max(pos.peak_pnl_pct, pnl_pct)
         pos.exit_date = today.strftime("%Y-%m-%d")
         pos.exit_price = round(price, 2)
         pos.exit_reason = reason
-        pos.pnl = round((price - pos.entry_price) * pos.quantity, 2)
-        pos.pnl_pct = round(pnl_pct, 2)
+        leg_pnl = round((price - pos.entry_price) * pos.quantity, 2)
+        total_pnl = round(pos.partial_pnl + leg_pnl, 2)
+        pos.pnl = total_pnl
+        orig_qty = pos.initial_quantity or pos.quantity
+        orig_capital = pos.entry_price * orig_qty if orig_qty and pos.entry_price else 1.0
+        pos.pnl_pct = round((total_pnl / orig_capital) * 100, 2) if orig_capital > 0 else round(pnl_pct, 2)
         pos.status = "CLOSED"
 
         from services.chartedge_core.database import persist_stock_exit
@@ -470,12 +586,22 @@ class PositionalStocksEngine:
         self.last_exit_dates[symbol] = today
         self.closed_positions.append(pos)
         del self.open_positions[symbol]
-        return pos
+        return StockExitEvent(
+            symbol=symbol,
+            position=pos,
+            is_partial=False,
+            exit_qty=pos.quantity,
+            exit_price=pos.exit_price,
+            exit_reason=reason,
+            pnl=leg_pnl,
+            pnl_pct=round(pnl_pct, 2),
+            total_pnl=total_pnl,
+        )
 
     def maybe_rotate_and_enter(self, symbol: str, today: date, price: float, score: float,
                                 buy_threshold: float, open_scores: dict[str, float],
                                 open_prices: dict[str, float], trail_arm_pct: float = 3.0,
-                                rotation_margin: float = 0.15) -> Optional[tuple[StockPosition, StockPosition]]:
+                                rotation_margin: float = 0.15) -> Optional[tuple[StockExitEvent, StockPosition]]:
         """Portfolio-manager-style capital rotation. Call this only after
         maybe_enter() has already returned None purely because the pool is
         full (max_positions reached or capital fully deployed) -- the caller
@@ -495,6 +621,7 @@ class PositionalStocksEngine:
         candidates = [
             (sym, open_scores[sym]) for sym in self.open_positions
             if sym in open_scores and self.open_positions[sym].peak_pnl_pct < trail_arm_pct
+            and not self.open_positions[sym].partial_exit_done
         ]
         if not candidates:
             return None

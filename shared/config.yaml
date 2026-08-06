@@ -212,7 +212,9 @@ positional_stocks_risk:
   capital: 100000.0       # separate allocation, not shared with intraday or options positional capital
   max_positions: 5        # equal-slot capital sizing: capital / max_positions per stock
   stop_loss_pct: 4.0
-  target_pct: 12.0
+  target_pct: 14.0
+  partial_exit_frac: 0.5  # 50% exit at Stage 1 target (+14%)
+  enable_runner_phase: true # remaining 50% trails with +14% hard stop floor
   buy_threshold: 0.35
   sell_threshold: -0.35
   min_adx: 25.0           # skip BUY entries when ADX below this (avoid chop)
@@ -255,7 +257,9 @@ positional_stocks_midcap_risk:
                             # PositionalStocksEngine.maybe_rotate_and_enter.
   rotation_margin: 0.15    # new signal's score must beat the weakest holding's by this much
   stop_loss_pct: 4.0
-  target_pct: 12.0
+  target_pct: 14.0
+  partial_exit_frac: 0.5
+  enable_runner_phase: true
   buy_threshold: 0.35
   sell_threshold: -0.35
   min_adx: 25.0
@@ -297,7 +301,9 @@ positional_stocks_smallcap_risk:
   allow_rotation: true
   rotation_margin: 0.15
   stop_loss_pct: 4.0
-  target_pct: 12.0
+  target_pct: 14.0
+  partial_exit_frac: 0.5
+  enable_runner_phase: true
   buy_threshold: 0.35
   sell_threshold: -0.35
   min_adx: 25.0

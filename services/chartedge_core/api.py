@@ -48,6 +48,7 @@ if _positional_cfg.get("enabled", False):
 
     # Weekly positional data source is Upstox-only -- no INDstocks fallback.
     _positional_provider = UpstoxDataProvider()
+    _positional_data_source = "upstox"
     print("DEBUG: Weekly positional data source: upstox")
 
     if _positional_cfg.get("mode", "single") == "parallel":
@@ -92,10 +93,12 @@ if _positional_stocks_cfg.get("enabled", False):
     from services.chartedge_core.positional_stocks_runtime import PositionalStocksRuntime
     positional_stocks_engine = PositionalStocksEngine(
         capital=_positional_stocks_cfg.get("capital", 100000.0),
-        max_positions=_positional_stocks_cfg.get("max_positions", 4),
-        stop_loss_pct=_positional_stocks_cfg.get("stop_loss_pct", 6.0),
-        target_pct=_positional_stocks_cfg.get("target_pct", 12.0),
+        max_positions=_positional_stocks_cfg.get("max_positions", 5),
+        stop_loss_pct=_positional_stocks_cfg.get("stop_loss_pct", 4.0),
+        target_pct=_positional_stocks_cfg.get("target_pct", 14.0),
         reentry_cooldown_sessions=_positional_stocks_cfg.get("reentry_cooldown_sessions", 0),
+        partial_exit_frac=_positional_stocks_cfg.get("partial_exit_frac", 0.5),
+        enable_runner_phase=_positional_stocks_cfg.get("enable_runner_phase", True),
     )
     positional_stocks_runtime_wrapper = PositionalStocksRuntime(positional_stocks_engine, _positional_stocks_cfg)
     print("DEBUG: Positional stocks engine enabled")
@@ -114,10 +117,12 @@ if _positional_stocks_midcap_cfg.get("enabled", False):
         capital=_positional_stocks_midcap_cfg.get("capital", 100000.0),
         max_positions=_positional_stocks_midcap_cfg.get("max_positions", 8),
         stop_loss_pct=_positional_stocks_midcap_cfg.get("stop_loss_pct", 4.0),
-        target_pct=_positional_stocks_midcap_cfg.get("target_pct", 12.0),
+        target_pct=_positional_stocks_midcap_cfg.get("target_pct", 14.0),
         pool="midcap",
         confidence_sizing=_positional_stocks_midcap_cfg.get("confidence_sizing", False),
         reentry_cooldown_sessions=_positional_stocks_midcap_cfg.get("reentry_cooldown_sessions", 0),
+        partial_exit_frac=_positional_stocks_midcap_cfg.get("partial_exit_frac", 0.5),
+        enable_runner_phase=_positional_stocks_midcap_cfg.get("enable_runner_phase", True),
     )
     positional_stocks_midcap_runtime_wrapper = PositionalStocksRuntime(
         positional_stocks_midcap_engine, _positional_stocks_midcap_cfg
@@ -140,10 +145,12 @@ if _positional_stocks_smallcap_cfg.get("enabled", False):
         capital=_positional_stocks_smallcap_cfg.get("capital", 100000.0),
         max_positions=_positional_stocks_smallcap_cfg.get("max_positions", 10),
         stop_loss_pct=_positional_stocks_smallcap_cfg.get("stop_loss_pct", 4.0),
-        target_pct=_positional_stocks_smallcap_cfg.get("target_pct", 12.0),
+        target_pct=_positional_stocks_smallcap_cfg.get("target_pct", 14.0),
         pool="smallcap",
         confidence_sizing=_positional_stocks_smallcap_cfg.get("confidence_sizing", False),
         reentry_cooldown_sessions=_positional_stocks_smallcap_cfg.get("reentry_cooldown_sessions", 0),
+        partial_exit_frac=_positional_stocks_smallcap_cfg.get("partial_exit_frac", 0.5),
+        enable_runner_phase=_positional_stocks_smallcap_cfg.get("enable_runner_phase", True),
     )
     positional_stocks_smallcap_runtime_wrapper = PositionalStocksRuntime(
         positional_stocks_smallcap_engine, _positional_stocks_smallcap_cfg

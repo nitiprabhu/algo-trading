@@ -398,10 +398,16 @@ class StockPositionRecord(SQLModel, table=True):
     entry_date: str  # YYYY-MM-DD
     entry_price: float
     quantity: int
+    initial_quantity: Optional[int] = None  # quantity before any partial exit
     status: str = "OPEN"  # OPEN or CLOSED
+    partial_exit_done: bool = False  # True once Target 1 (+14%) 50% exit has occurred
+    partial_exit_date: Optional[str] = None
+    partial_exit_price: Optional[float] = None
+    partial_exit_qty: Optional[int] = None
+    partial_pnl: float = 0.0
     exit_date: Optional[str] = None  # YYYY-MM-DD
     exit_price: Optional[float] = None
-    exit_reason: Optional[str] = None  # "TARGET", "STOP_LOSS", "TRAILING_STOP", "SELL_SIGNAL"
+    exit_reason: Optional[str] = None  # "TARGET", "STOP_LOSS", "TRAILING_STOP", "SELL_SIGNAL", "RUNNER_PROFIT_LOCK", "RUNNER_TRAILING_STOP", "RUNNER_TREND_EXIT"
     pnl: float = 0.0
     pnl_pct: float = 0.0
     peak_pnl_pct: float = 0.0
@@ -425,6 +431,7 @@ def persist_stock_entry(symbol: str, entry_date: str, entry_price: float, quanti
                 entry_date=entry_date,
                 entry_price=entry_price,
                 quantity=quantity,
+                initial_quantity=quantity,
                 status="OPEN"
             )
             session.add(record)
@@ -433,6 +440,36 @@ def persist_stock_entry(symbol: str, entry_date: str, entry_price: float, quanti
             return record
     except Exception as e:
         print(f"⚠️ Failed to persist stock entry: {e}")
+        return None
+
+
+def persist_stock_partial_exit(position_id: str, exit_date: str, exit_price: float,
+                               exit_qty: int, partial_pnl: float,
+                               remaining_qty: int) -> Optional[StockPositionRecord]:
+    """Record a 50% partial profit booking for a position in the database."""
+    if not DATABASE_URL:
+        return None
+    try:
+        with Session(engine) as session:
+            statement = select(StockPositionRecord).where(StockPositionRecord.position_id == position_id)
+            record = session.exec(statement).first()
+            if not record:
+                return None
+            if record.initial_quantity is None:
+                record.initial_quantity = record.quantity
+            record.partial_exit_done = True
+            record.partial_exit_date = exit_date
+            record.partial_exit_price = exit_price
+            record.partial_exit_qty = exit_qty
+            record.partial_pnl = partial_pnl
+            record.quantity = remaining_qty
+            record.updated_at = datetime.utcnow()
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+    except Exception as e:
+        print(f"⚠️ Failed to persist stock partial exit: {e}")
         return None
 
 

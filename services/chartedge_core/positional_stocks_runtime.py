@@ -137,14 +137,18 @@ class PositionalStocksRuntime:
             prices_today[symbol] = price
 
             if symbol in self.engine.open_positions:
-                closed = self.engine.check_exit(
+                exit_event = self.engine.check_exit(
                     symbol, today, price, score, sell_threshold,
                     trail_arm_pct=trail_arm_pct, trail_keep_frac=trail_keep_frac,
                 )
-                if closed:
-                    await self._notify_exit(closed)
-                    await self._live_exit(closed)
-                    exits.append(symbol)
+                if exit_event:
+                    if exit_event.is_partial:
+                        await self._notify_partial_exit(exit_event)
+                        await self._live_partial_exit(exit_event)
+                    else:
+                        await self._notify_exit(exit_event)
+                        await self._live_exit(exit_event)
+                        exits.append(symbol)
             else:
                 trend_confirmed = True
                 if require_trend_gate:
@@ -268,7 +272,46 @@ class PositionalStocksRuntime:
         )
         return False
 
-    async def _live_exit(self, position) -> None:
+    async def _live_partial_exit(self, event) -> None:
+        """Fire a live Upstox SELL for 50% partial profit booking, then cancel the
+        original GTT stop and place a new GTT stop locked at +14% entry price for
+        the remaining runner shares."""
+        from services.chartedge_core.upstox_broker import live_broker, log_order_event
+        from services.chartedge_core.telegram import notifier
+        broker = live_broker()
+        if not broker.enabled:
+            return
+        if not broker.dry_run:
+            await self._maybe_request_token(broker)
+        res = broker.place_exit(event.symbol, event.exit_qty, self._live_tag())
+        log_order_event("SELL_PARTIAL", event.symbol, res)
+        mode = "SIM" if res.simulated else "LIVE"
+        if res.ok:
+            await notifier.send_message(
+                f"[{mode} ORDER] PARTIAL SELL {event.symbol} x{event.exit_qty} | {res.reason}"
+            )
+            # Cancel old GTT stop
+            if not res.simulated:
+                await self._cancel_gtt_for_symbol(broker, event.symbol)
+            # Place new GTT stop at +14% entry price floor for the remaining runner shares
+            remaining_qty = event.position.quantity
+            if remaining_qty > 0:
+                runner_stop_price = event.entry_price * (1 + self.engine.target_pct / 100)
+                gtt_res = broker.place_custom_gtt_stop(event.symbol, remaining_qty, runner_stop_price)
+                if gtt_res.ok:
+                    await notifier.send_message(
+                        f"🔒 [{mode} GTT UPDATED] {event.symbol} x{remaining_qty} stop locked @ ₹{runner_stop_price:.2f} (+{self.engine.target_pct}%)"
+                    )
+                else:
+                    await notifier.send_message(
+                        f"⚠️ [{mode} GTT UPDATE FAILED] {event.symbol} x{remaining_qty} stop @ ₹{runner_stop_price:.2f} -- {gtt_res.reason}"
+                    )
+        else:
+            await notifier.send_message(
+                f"⚠️ [{mode} ORDER FAILED] PARTIAL SELL {event.symbol} -- {res.reason}"
+            )
+
+    async def _live_exit(self, event) -> None:
         """Fire a live Upstox SELL to close a live position on an engine exit.
         If no valid token, the sell is skipped and the position's server-side
         GTT stop remains the protective floor -- surfaced via alert. On a
@@ -284,18 +327,18 @@ class PositionalStocksRuntime:
             return
         if not broker.dry_run:
             await self._maybe_request_token(broker)
-        res = broker.place_exit(position.symbol, position.quantity, self._live_tag())
-        log_order_event("SELL", position.symbol, res)
+        res = broker.place_exit(event.symbol, event.quantity, self._live_tag())
+        log_order_event("SELL", event.symbol, res)
         mode = "SIM" if res.simulated else "LIVE"
         if res.ok:
             await notifier.send_message(
-                f"[{mode} ORDER] SELL {position.symbol} x{position.quantity} | {res.reason}"
+                f"[{mode} ORDER] SELL {event.symbol} x{event.quantity} | {res.reason}"
             )
             if not res.simulated:
-                await self._cancel_gtt_for_symbol(broker, position.symbol)
+                await self._cancel_gtt_for_symbol(broker, event.symbol)
         else:
             await notifier.send_message(
-                f"⚠️ [{mode} ORDER FAILED] SELL {position.symbol} -- {res.reason}"
+                f"⚠️ [{mode} ORDER FAILED] SELL {event.symbol} -- {res.reason}"
             )
 
     async def _cancel_gtt_for_symbol(self, broker, symbol: str) -> None:
@@ -343,15 +386,30 @@ class PositionalStocksRuntime:
         )
         await notifier.send_message(msg)
 
-    async def _notify_exit(self, position) -> None:
+    async def _notify_partial_exit(self, event) -> None:
         from services.chartedge_core.telegram import notifier
         tag = "POSITIONAL STOCKS" if self.engine.pool == "largecap" else f"POSITIONAL STOCKS {self.engine.pool.upper()}"
-        emoji = "profit" if position.pnl >= 0 else "loss"
+        runner_stop = event.entry_price * (1 + self.engine.target_pct / 100)
         msg = (
-            f"[{tag}] SELL {position.symbol} ({emoji})\n\n"
-            f"Reason: {position.exit_reason}\n"
-            f"Entry: {position.entry_price} -> Exit: {position.exit_price}\n"
-            f"PnL: {position.pnl:+.2f} ({position.pnl_pct:+.2f}%)"
+            f"🎯 [{tag}] PARTIAL PROFIT BOOKED (STAGE 1 EXIT)\n\n"
+            f"Symbol: {event.symbol}\n"
+            f"Sold: {event.exit_qty} shares @ ₹{event.exit_price:.2f} (Target +{self.engine.target_pct}% hit!)\n"
+            f"Realized PnL: ₹{event.pnl:+.2f} ({event.pnl_pct:+.2f}%)\n"
+            f"Remaining: {event.position.quantity} shares running with Stop-Loss locked @ ₹{runner_stop:.2f} (+{self.engine.target_pct}%)"
+        )
+        await notifier.send_message(msg)
+
+    async def _notify_exit(self, event) -> None:
+        from services.chartedge_core.telegram import notifier
+        tag = "POSITIONAL STOCKS" if self.engine.pool == "largecap" else f"POSITIONAL STOCKS {self.engine.pool.upper()}"
+        total_pnl = getattr(event, "total_pnl", event.pnl)
+        emoji = "profit" if total_pnl >= 0 else "loss"
+        msg = (
+            f"[{tag}] SELL {event.symbol} ({emoji})\n\n"
+            f"Reason: {event.exit_reason}\n"
+            f"Exit: {event.quantity} shares @ ₹{event.exit_price:.2f}\n"
+            f"Leg PnL: ₹{event.pnl:+.2f} ({event.pnl_pct:+.2f}%)\n"
+            f"Total Trade PnL: ₹{total_pnl:+.2f} ({event.pnl_pct:+.2f}%)"
         )
         await notifier.send_message(msg)
 

@@ -41,7 +41,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -416,6 +416,45 @@ class UpstoxBroker:
             raise RuntimeError(f"GTT HTTP {resp.status_code}: {resp.text[:200]}")
         data = resp.json().get("data", {})
         return data.get("gtt_order_id") or data.get("gtt_order_ids", [None])[0]
+
+    def place_custom_gtt_stop(self, symbol: str, quantity: int, trigger_price: float) -> OrderResult:
+        """Place an explicit server-side GTT stop-loss at a specified trigger price.
+        Used when updating stops for runner positions (e.g. locking in +14% profit)."""
+        if not self.enabled:
+            return OrderResult(ok=True, simulated=True, reason="live trading disabled (config)")
+        if self.dry_run:
+            trigger = round(round(trigger_price / 0.05) * 0.05, 2)
+            print(f"[UpstoxBroker DRY-RUN] GTT stop {symbol} x{quantity} @ {trigger}")
+            return OrderResult(ok=True, simulated=True, gtt_id=f"DRY-GTT-{symbol}", reason=f"dry_run GTT @ {trigger}")
+        token = self.get_valid_token()
+        if not token:
+            return OrderResult(ok=False, simulated=False, reason="no valid Upstox token")
+        instrument = self._lookup_instrument(symbol)
+        if not instrument:
+            return OrderResult(ok=False, simulated=False, reason=f"could not resolve instrument_token for {symbol}")
+        try:
+            trigger = round(round(trigger_price / 0.05) * 0.05, 2)
+            body = {
+                "type": "SINGLE",
+                "quantity": int(quantity),
+                "product": PRODUCT_DELIVERY,
+                "instrument_token": instrument,
+                "transaction_type": "SELL",
+                "rules": [{
+                    "strategy": "ENTRY",
+                    "trigger_type": "BELOW",
+                    "trigger_price": trigger,
+                }],
+            }
+            resp = requests.post(f"{self._gtt_base}{PLACE_GTT_PATH}",
+                                 headers=self._headers(token), json=body, timeout=15)
+            if resp.status_code not in (200, 201):
+                return OrderResult(ok=False, simulated=False, reason=f"GTT HTTP {resp.status_code}: {resp.text[:200]}")
+            data = resp.json().get("data", {})
+            gtt_id = data.get("gtt_order_id") or data.get("gtt_order_ids", [None])[0]
+            return OrderResult(ok=True, simulated=False, gtt_id=gtt_id, reason=f"GTT placed @ {trigger}")
+        except Exception as e:
+            return OrderResult(ok=False, simulated=False, reason=f"GTT exception: {e}")
 
     # --- GTT book: list + cancel (reconciliation job) ----------------------
     def list_gtt(self, token: str) -> list[dict[str, Any]]:

@@ -14,7 +14,7 @@ IST = ZoneInfo("Asia/Kolkata")
 class TelegramNotifier:
     def __init__(self):
         # Read from environment
-        self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "8740074056:AAFi3qKifRyMw9hsIwU1qC6Qqez2DqwA4Qo")
+        self.bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "8740074056:AAHJ17rla5FAhS3TbsFbzSIlmFEaIQ4mKlc")
         self._chat_id = os.getenv("TELEGRAM_CHAT_ID")
         
         # Local cache file for resolved chat ID

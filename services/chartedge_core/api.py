@@ -269,12 +269,12 @@ async def lifespan(app: FastAPI):
             if res is None:
                 return
             if res.get("ok"):
-                await notifier.send_message(
+                await notifier.send_debug_message(
                     "🔐 [UPSTOX] Daily token approval requested on startup -- "
                     "approve the WhatsApp/app push now to enable live trading today."
                 )
             else:
-                await notifier.send_message(f"⚠️ [UPSTOX] boot token request failed: {res.get('reason')}")
+                await notifier.send_debug_message(f"⚠️ [UPSTOX] boot token request failed: {res.get('reason')}")
         asyncio.create_task(boot_token_request())
 
         # Periodic re-check during market hours: boot_token_request only catches a
@@ -297,12 +297,12 @@ async def lifespan(app: FastAPI):
                     continue
                 res = request_access_token()
                 if res.get("ok"):
-                    await notifier.send_message(
+                    await notifier.send_debug_message(
                         "🔐 [UPSTOX] Token invalid mid-session -- re-requested approval. "
                         "Approve the WhatsApp/app push now to resume live trading today."
                     )
                 else:
-                    await notifier.send_message(f"⚠️ [UPSTOX] mid-session token re-request failed: {res.get('reason')}")
+                    await notifier.send_debug_message(f"⚠️ [UPSTOX] mid-session token request failed: {res.get('reason')}")
         asyncio.create_task(periodic_token_recheck())
 
     # Cleanup expired records daily (TTL: 30 days for positional trades, 180 days for stock positions)
@@ -321,7 +321,7 @@ async def lifespan(app: FastAPI):
         from services.chartedge_core.telegram import notifier
         await asyncio.sleep(15 * 60)  # grace period for normal warmup
         if runtime.feed_health != "OK":
-            await notifier.send_message(
+            await notifier.send_debug_message(
                 f"⚠️ [FEED] health still '{runtime.feed_health}' 15min after startup -- "
                 "signals/prices may be stale or absent."
             )
@@ -713,6 +713,17 @@ async def upstox_token_webhook(secret: str, request: Request) -> dict:
     today = _dt.now(_ZI("Asia/Kolkata")).strftime("%Y-%m-%d")
     token_path = _Path(os.getenv("UPSTOX_TOKEN_FILE", "data/upstox_token.json"))
     token_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Deduplicate: Only notify if token changed
+    token_changed = True
+    if token_path.exists():
+        try:
+            existing = _json.loads(token_path.read_text())
+            if existing.get("access_token") == token and existing.get("date") == today:
+                token_changed = False
+        except Exception:
+            pass
+
     # date drives the daily validity gate in UpstoxBroker.get_valid_token();
     # expires_at (epoch ms from Upstox) kept for reference/observability.
     token_path.write_text(_json.dumps({
@@ -721,11 +732,13 @@ async def upstox_token_webhook(secret: str, request: Request) -> dict:
         "message_type": payload.get("message_type"),
     }))
     print(f"[Upstox] daily token stored for {today} (expires_at={payload.get('expires_at')})")
-    try:
-        from services.chartedge_core.telegram import notifier as _n
-        await _n.send_message(f"[UPSTOX] daily token received + stored for {today}. Live orders armed for today.")
-    except Exception:
-        pass
+    
+    if token_changed:
+        try:
+            from services.chartedge_core.telegram import notifier as _n
+            await _n.send_debug_message(f"[UPSTOX] daily token received + stored for {today}. Live orders armed for today.")
+        except Exception:
+            pass
     return {"stored": True, "date": today}
 
 

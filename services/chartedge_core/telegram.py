@@ -102,6 +102,24 @@ class TelegramNotifier:
             print("⚠️ Telegram Chat ID not resolved yet. Send a message (e.g. /start) to the bot on Telegram first!")
             return False
 
+        return await self._send_to_chat(self._chat_id, text)
+
+    async def send_debug_message(self, text: str) -> bool:
+        """Send a diagnostic/debug message to the debug channel if configured, otherwise fallback to main channel."""
+        debug_chat_id = os.getenv("TELEGRAM_DEBUG_CHAT_ID")
+        target_chat = debug_chat_id if debug_chat_id else self._chat_id
+        
+        if not target_chat:
+            if not self._chat_id:
+                await self.resolve_chat_id()
+            target_chat = self._chat_id
+            
+        if not target_chat:
+            return False
+            
+        return await self._send_to_chat(target_chat, text)
+
+    async def _send_to_chat(self, chat_id: str, text: str) -> bool:
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
 
         def post(payload):
@@ -112,16 +130,13 @@ class TelegramNotifier:
 
         try:
             await asyncio.to_thread(
-                post, {"chat_id": self._chat_id, "text": text, "parse_mode": "Markdown"}
+                post, {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
             )
             return True
         except urllib.error.HTTPError as e:
             if e.code == 400:
-                # Markdown parse errors (stray _/* in symbol/tag text) must not
-                # swallow the alert -- retry once as plain text so live-order
-                # fill/fail results always reach Telegram.
                 try:
-                    await asyncio.to_thread(post, {"chat_id": self._chat_id, "text": text})
+                    await asyncio.to_thread(post, {"chat_id": chat_id, "text": text})
                     return True
                 except Exception as e2:
                     print(f"Error sending message to Telegram (plain-text retry): {e2}")
@@ -284,7 +299,7 @@ class TelegramNotifier:
         all_positions = opt_positions + fut_positions
 
         if not all_positions:
-            await self.send_message("📊 *PORTFOLIO SUMMARY (Startup)*\n\nNo open positions. Starting fresh.")
+            await self.send_debug_message("📊 *PORTFOLIO SUMMARY (Startup)*\n\nNo open positions. Starting fresh.")
             return
 
         import re
@@ -317,7 +332,7 @@ class TelegramNotifier:
             + f"\n\n*Total Invested:* ₹{total_invested:,.1f}\n"
             f"*Current MTM:* {'🟢' if total_pnl >= 0 else '🔴'} ₹{total_pnl:,.1f}"
         )
-        await self.send_message(msg)
+        await self.send_debug_message(msg)
 
     async def _handle_command(self, command: str, runtime) -> None:
         self._recalculate_open_positions_pnl(runtime)

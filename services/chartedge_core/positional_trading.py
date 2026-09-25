@@ -285,11 +285,35 @@ class PositionalTradingEngine:
         those weeks). Falls back to weekday arithmetic only if not supplied."""
         if self.open_trade is not None:
             return None
-        last_expiry = datetime.strptime(self.closed_trades[-1].expiry, "%Y-%m-%d").date() if self.closed_trades else None
+        # max(), not closed_trades[-1]: self.closed_trades is chronological
+        # (oldest->newest) when built live via append(), but _load() populates
+        # it from a DESC-ordered DB query (newest->oldest) on every process
+        # restart -- closed_trades[-1] silently means "newest" in one code path
+        # and "oldest" in the other. A restart mid-week would then read a
+        # stale last_expiry and defeat the once-per-week gate right when it
+        # matters most. max() is correct regardless of how the list was built.
+        last_expiry = max(
+            (datetime.strptime(t.expiry, "%Y-%m-%d").date() for t in self.closed_trades),
+            default=None,
+        )
         if not self.strategy.is_entry_day(today, last_expiry):
             return None
 
         expiry = target_expiry or self.strategy.next_expiry(today)
+
+        # Persisted-truth guard, independent of in-memory state: refuse if a
+        # trade for this expiry already exists in the DB. Belt-and-suspenders
+        # for the above -- protects against ANY future bug (not just this one)
+        # or a race between two processes that both pass the in-memory check.
+        if not self.is_backtesting:
+            from services.chartedge_core.database import has_positional_trade_for_expiry
+            expiry_str = expiry.strftime("%Y-%m-%d")
+            if has_positional_trade_for_expiry(self.strategy_name, expiry_str):
+                print(f"⚠️ [Positional/{self.strategy_name}] Refusing entry: a trade for "
+                      f"expiry {expiry_str} already exists in the DB (in-memory state said "
+                      f"it was clear -- likely a post-restart stale read). Skipping this cycle.")
+                return None
+
         dte = (expiry - today).days
         legs = self.strategy.size_legs(spot, vix, dte, trend_pct)
 

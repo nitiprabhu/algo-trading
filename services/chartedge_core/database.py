@@ -385,6 +385,29 @@ def get_closed_positional_trades(limit: int = 50, strategy: Optional[str] = None
         return []
 
 
+def has_positional_trade_for_expiry(strategy: str, expiry: str) -> bool:
+    """True if a trade (OPEN or CLOSED, any exit reason) already exists for this
+    strategy+expiry. Persisted-truth guard called right before every entry commit,
+    independent of in-memory state -- catches the case a restart (or any future
+    bug) makes the engine forget it already traded this week's expiry, which
+    in-memory-only bookkeeping cannot: it wiped exactly the state that would have
+    caught it. Fail CLOSED (treat DB errors as "trade exists") since blocking a
+    legitimate entry is far cheaper than risking a second real-money position on
+    the same expiry."""
+    if not DATABASE_URL:
+        return False
+    try:
+        with Session(engine) as session:
+            statement = select(PositionalTradeRecord).where(
+                PositionalTradeRecord.strategy == strategy,
+                PositionalTradeRecord.expiry == expiry,
+            )
+            return session.exec(statement).first() is not None
+    except Exception as e:
+        print(f"⚠️ Failed to check existing positional trade for expiry: {e}")
+        return True
+
+
 # ── Positional Stocks (Long-Only Technical Investment) ─────────────────────────
 
 class StockPositionRecord(SQLModel, table=True):
